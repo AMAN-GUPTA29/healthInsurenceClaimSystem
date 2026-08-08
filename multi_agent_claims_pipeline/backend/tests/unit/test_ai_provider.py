@@ -47,8 +47,8 @@ class TestAIProviderInterface:
         provider = create_ai_provider(settings)
         assert provider.model_name == "claude-opus-4-5"
 
-    def test_factory_raises_for_unconfigured_gemini(self):
-        settings = Settings(ai_provider="gemini")
+    def test_factory_raises_for_gemini_without_api_key(self):
+        settings = Settings(ai_provider="gemini", gemini_api_key=None)
         with pytest.raises(AIProviderNotConfiguredError):
             create_ai_provider(settings)
 
@@ -86,6 +86,54 @@ class TestAIProviderInterface:
         assert provider.supports_vision is True
 
 
+class TestGeminiProvider:
+    def test_provider_factory_returns_ai_provider_instance(self):
+        """Factory must return an AIProvider subclass."""
+        settings = Settings(
+            ai_provider="gemini",
+            ai_model="gemini-2.5-flash",
+            gemini_api_key="test-key",
+        )
+        provider = create_ai_provider(settings)
+        assert isinstance(provider, AIProvider)
+
+    def test_provider_name_is_gemini(self):
+        settings = Settings(
+            ai_provider="gemini",
+            ai_model="gemini-2.5-flash",
+            gemini_api_key="test-key",
+        )
+        provider = create_ai_provider(settings)
+        assert provider.provider_name == "gemini"
+
+    def test_model_name_matches_config(self):
+        settings = Settings(
+            ai_provider="gemini",
+            ai_model="gemini-2.5-pro",
+            gemini_api_key="test-key",
+        )
+        provider = create_ai_provider(settings)
+        assert provider.model_name == "gemini-2.5-pro"
+
+    def test_provider_supports_native_pdf(self):
+        settings = Settings(
+            ai_provider="gemini",
+            ai_model="gemini-2.5-flash",
+            gemini_api_key="test-key",
+        )
+        provider = create_ai_provider(settings)
+        assert provider.supports_native_pdf is True
+
+    def test_provider_supports_vision(self):
+        settings = Settings(
+            ai_provider="gemini",
+            ai_model="gemini-2.5-flash",
+            gemini_api_key="test-key",
+        )
+        provider = create_ai_provider(settings)
+        assert provider.supports_vision is True
+
+
 class TestAIProviderVendorIsolation:
     def test_anthropic_sdk_not_importable_from_domain(self):
         """
@@ -95,10 +143,12 @@ class TestAIProviderVendorIsolation:
         """
         import app.domain.models as models_module
         assert "anthropic" not in dir(models_module)
+        assert "genai" not in dir(models_module)
 
-    def test_anthropic_sdk_not_importable_from_agents(self):
+    def test_ai_sdks_not_importable_from_agents(self):
         import app.agents.base_agent as agent_module
         assert "anthropic" not in dir(agent_module)
+        assert "genai" not in dir(agent_module)
 
     def test_anthropic_provider_is_only_file_with_sdk(self):
         """
@@ -109,3 +159,10 @@ class TestAIProviderVendorIsolation:
         from app.ai.providers import base
         assert not hasattr(base, "anthropic")
         assert not hasattr(base, "AsyncAnthropic")
+
+    def test_gemini_sdk_not_leaked_from_base_provider(self):
+        """
+        The google-genai SDK should only be imported in gemini_provider.py.
+        """
+        from app.ai.providers import base
+        assert not hasattr(base, "genai")

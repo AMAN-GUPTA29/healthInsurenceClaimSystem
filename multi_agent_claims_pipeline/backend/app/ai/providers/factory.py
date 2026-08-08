@@ -43,10 +43,21 @@ def create_ai_provider(settings: Settings) -> AIProvider:
             timeout_seconds=settings.ai_timeout_seconds,
         )
 
-    # ── Future providers ──────────────────────────────────────────────────────
     if settings.ai_provider == AIProviderEnum.GEMINI:
-        raise AIProviderNotConfiguredError("gemini")
+        from app.ai.providers.gemini_provider import GeminiProvider
 
+        if not settings.gemini_api_key:
+            raise AIProviderNotConfiguredError("gemini")
+
+        return GeminiProvider(
+            api_key=settings.gemini_api_key,
+            model=settings.ai_model,
+            temperature=settings.ai_temperature,
+            max_tokens=settings.ai_max_tokens,
+            timeout_seconds=settings.ai_timeout_seconds,
+        )
+
+    # ── Future providers ──────────────────────────────────────────────────────
     if settings.ai_provider == AIProviderEnum.OPENAI:
         raise AIProviderNotConfiguredError("openai")
 

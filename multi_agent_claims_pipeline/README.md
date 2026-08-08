@@ -49,7 +49,7 @@ multi_agent_claims_pipeline/
 
 ## Key Design Principles
 
-1. **AI provider abstraction** — Agents depend only on `AIProvider` (ABC). Vendor SDK imports exist ONLY in `app/ai/providers/anthropic_provider.py`.
+1. **AI provider abstraction** — Agents depend only on `AIProvider` (ABC). Vendor SDK imports exist ONLY inside their respective adapter: `app/ai/providers/gemini_provider.py` (default) and `app/ai/providers/anthropic_provider.py` (alternate).
 2. **No hardcoded policy rules** — All rules are loaded from `policy_terms.json`.
 3. **Deterministic financials** — The LLM never computes financial calculations.
 4. **Dependency injection** — Agents receive `AIProvider` via constructor, never via module globals.
@@ -64,7 +64,7 @@ multi_agent_claims_pipeline/
 
 - Python 3.11+
 - Node.js 18+ (for frontend)
-- An Anthropic API key
+- A Google Gemini API key (default provider) — get one at [Google AI Studio](https://aistudio.google.com/apikey)
 
 ### Backend
 
@@ -79,9 +79,9 @@ python -m venv .venv
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure environment
-cp .env.example ../.env
-# Edit ../.env and set ANTHROPIC_API_KEY=your-key-here
+# Configure environment (.env lives at the project root)
+cp ../.env.example ../.env
+# Edit ../.env and set GEMINI_API_KEY=your-key-here
 
 # Run the backend
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -125,12 +125,16 @@ See [.env.example](.env.example) for all configuration options.
 |----------|---------|-------------|
 | `APP_ENV` | `development` | Application environment |
 | `DATABASE_URL` | SQLite | SQLAlchemy async URL |
-| `AI_PROVIDER` | `anthropic` | AI provider (`anthropic`, `gemini`, `openai`) |
-| `AI_MODEL` | `claude-sonnet-4-5` | Model identifier |
+| `AI_PROVIDER` | `gemini` | AI provider (`gemini`, `anthropic`, `openai`) |
+| `AI_MODEL` | `gemini-2.5-flash` | Model identifier |
 | `AI_TIMEOUT_SECONDS` | `60` | AI API call timeout |
-| `ANTHROPIC_API_KEY` | — | **Required** for Anthropic provider |
+| `GEMINI_API_KEY` | — | **Required** for Gemini provider (default) |
+| `ANTHROPIC_API_KEY` | — | Required only if `AI_PROVIDER=anthropic` |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 | `CORS_ORIGINS` | localhost:5173 | Allowed frontend origins |
+
+> `.env` is read from the **project root** (`multi_agent_claims_pipeline/.env`)
+> regardless of whether you launch `uvicorn` from `backend/` or the project root.
 
 ---
 
@@ -164,7 +168,8 @@ python -m pytest --cov=app --cov-report=html
 - [x] Domain models (Claim, Member, Document, etc.)
 - [x] Error hierarchy (AI, Policy, Document, Pipeline errors)
 - [x] AI provider abstraction (AIProvider ABC)
-- [x] Anthropic adapter (only file with SDK imports)
+- [x] Gemini adapter (default provider, only file with `google-genai` imports)
+- [x] Anthropic adapter (alternate provider, only file with `anthropic` imports)
 - [x] Provider factory
 - [x] BaseAgent (dependency injection)
 - [x] Structured logging foundation

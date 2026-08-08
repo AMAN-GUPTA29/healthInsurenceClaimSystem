@@ -95,3 +95,41 @@ async def test_root_endpoint_returns_service_info(client):
     data = response.json()
     assert "service" in data
     assert "health" in data
+
+
+@pytest.fixture
+async def gemini_client(monkeypatch):
+    """Async test client for the FastAPI app, configured for Gemini."""
+    monkeypatch.setenv("APP_ENV", "testing")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///./data/test_health.db")
+
+    from app.config.settings import get_settings
+    from app.api.deps import _get_ai_provider_singleton
+    get_settings.cache_clear()
+    _get_ai_provider_singleton.cache_clear()
+
+    from app.main import create_app
+    app = create_app()
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as ac:
+        yield ac
+
+    get_settings.cache_clear()
+    _get_ai_provider_singleton.cache_clear()
+
+
+@pytest.mark.anyio
+async def test_health_reports_gemini_as_configured(gemini_client):
+    """Regression test: health status must reflect whichever provider is active,
+    not always check anthropic_api_key."""
+    response = await gemini_client.get("/api/v1/health")
+    data = response.json()
+    ai = data["ai_provider"]
+
+    assert ai["provider"] == "gemini"
+    assert ai["status"] == "configured"

@@ -54,10 +54,11 @@ async def health_check(
     Does NOT make a live AI API call (to keep this endpoint fast and free).
     Full AI provider health is checked separately.
     """
+    active_api_key = getattr(settings, f"{settings.ai_provider.value}_api_key", None)
     ai_status = AIProviderStatus(
         provider=settings.ai_provider.value,
         model=settings.ai_model,
-        status="configured" if settings.anthropic_api_key else "unconfigured",
+        status="configured" if active_api_key else "unconfigured",
     )
 
     return HealthResponse(

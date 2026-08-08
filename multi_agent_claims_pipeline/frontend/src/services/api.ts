@@ -10,7 +10,7 @@
  * - Errors are wrapped in APIError for consistent handling
  */
 
-import type { APIError, HealthResponse } from '../types'
+import type { APIError, ClaimTraceResponse, HealthResponse } from '../types'
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -65,9 +65,16 @@ export const systemApi = {
     request<HealthResponse>('/api/v1/health'),
 }
 
-// ── Claims Endpoints (Phase 1) ────────────────────────────────────────────────
+// ── Trace Endpoints ───────────────────────────────────────────────────────────
 
-// TODO Phase 1: Add claims submission and status endpoints
+export const traceApi = {
+  getClaimTrace: (claimId: string): Promise<ClaimTraceResponse> =>
+    request<ClaimTraceResponse>(`/api/v1/claims/${encodeURIComponent(claimId)}/trace`),
+}
+
+// ── Claims Endpoints (Phase 2) ────────────────────────────────────────────────
+
+// TODO Phase 2: Add claims submission and status endpoints
 // export const claimsApi = { ... }
 
 export { APIClientError }

@@ -9,10 +9,18 @@ from __future__ import annotations
 
 from enum import Enum
 from functools import lru_cache
+from pathlib import Path
 from typing import List, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The documented setup (README) places .env at the project root
+# (multi_agent_claims_pipeline/.env), one level above backend/. Since
+# pydantic-settings resolves a relative env_file against the process's CWD,
+# we also point explicitly at the project-root path so `.env` is found
+# whether uvicorn is launched from backend/ or from the project root.
+_PROJECT_ROOT_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
 
 class Environment(str, Enum):
@@ -45,7 +53,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", str(_PROJECT_ROOT_ENV_FILE)),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -68,9 +76,9 @@ class Settings(BaseSettings):
     )
 
     # ── AI Provider ───────────────────────────────────────────────────────────
-    ai_provider: AIProvider = AIProvider.ANTHROPIC
+    ai_provider: AIProvider = AIProvider.GEMINI
     ai_model: str = Field(
-        default="claude-sonnet-4-5",
+        default="gemini-2.5-flash",
         description="Model identifier for the configured AI provider.",
     )
     ai_temperature: float = Field(default=0.1, ge=0.0, le=2.0)
@@ -83,8 +91,11 @@ class Settings(BaseSettings):
         description="Anthropic Claude API key. Required when ai_provider=anthropic.",
     )
 
-    # ── Gemini (future) ───────────────────────────────────────────────────────
-    gemini_api_key: Optional[str] = Field(default=None)
+    # ── Gemini ────────────────────────────────────────────────────────────────
+    gemini_api_key: Optional[str] = Field(
+        default=None,
+        description="Google Gemini API key. Required when ai_provider=gemini.",
+    )
 
     # ── OpenAI (future) ───────────────────────────────────────────────────────
     openai_api_key: Optional[str] = Field(default=None)

@@ -142,6 +142,68 @@ export interface ClaimDecision {
   processing_time_ms?: number
 }
 
+// ── Trace / Observability ────────────────────────────────────────────────────
+//
+// Mirrors app/domain/trace.py. Keep this block in sync with the backend
+// enums/models rather than letting the shape drift or duplicating it
+// elsewhere in the frontend.
+
+export type TraceComponent =
+  | 'CLAIM_VALIDATION'
+  | 'DOCUMENT_VERIFICATION'
+  | 'DOCUMENT_EXTRACTION'
+  | 'CROSS_DOCUMENT_VALIDATION'
+  | 'POLICY_ENGINE'
+  | 'FRAUD_ANALYSIS'
+  | 'FINANCIAL_CALCULATION'
+  | 'DECISION_GENERATION'
+  | 'EXPLANATION'
+  | 'PIPELINE'
+
+export type TraceEventType =
+  | 'STARTED'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'SKIPPED'
+  | 'WARNING'
+
+export interface TraceErrorInfo {
+  error_type: string
+  code?: string
+  message: string
+  recoverable: boolean
+}
+
+export interface AITraceMetadata {
+  provider?: string
+  model?: string
+  latency_ms?: number
+  input_tokens?: number
+  output_tokens?: number
+}
+
+export interface TraceEvent {
+  event_id: string
+  trace_id: string
+  claim_id: string
+  component: TraceComponent
+  event_type: TraceEventType
+  message: string
+  timestamp: string
+  duration_ms?: number
+  confidence?: number
+  metadata: Record<string, unknown>
+  error?: TraceErrorInfo
+  ai_metadata?: AITraceMetadata
+  sequence?: number
+}
+
+export interface ClaimTraceResponse {
+  claim_id: string
+  count: number
+  events: TraceEvent[]
+}
+
 // ── API Error ─────────────────────────────────────────────────────────────────
 
 export interface APIError {

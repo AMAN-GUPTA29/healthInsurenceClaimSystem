@@ -21,9 +21,9 @@ class TestSettingsDefaults:
         s = Settings()
         assert s.app_env == Environment.DEVELOPMENT
 
-    def test_default_ai_provider_is_anthropic(self):
+    def test_default_ai_provider_is_gemini(self):
         s = Settings()
-        assert s.ai_provider == AIProvider.ANTHROPIC
+        assert s.ai_provider == AIProvider.GEMINI
 
     def test_default_ai_timeout(self):
         s = Settings()

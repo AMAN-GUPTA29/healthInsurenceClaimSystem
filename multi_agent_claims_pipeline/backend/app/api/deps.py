@@ -19,6 +19,7 @@ from fastapi import Depends
 from app.ai.providers.base import AIProvider
 from app.ai.providers.factory import create_ai_provider
 from app.config.settings import Settings, get_settings
+from app.repositories.trace_repository import TraceRepository
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -53,3 +54,20 @@ def get_ai_provider() -> AIProvider:
 
 
 AIProviderDep = Annotated[AIProvider, Depends(get_ai_provider)]
+
+
+# ── Trace Repository ──────────────────────────────────────────────────────────
+
+
+def get_trace_repository() -> TraceRepository:
+    """
+    FastAPI dependency that returns a TraceRepository.
+
+    Not cached/singleton: the repository is stateless — each method opens
+    its own database session — so there's no shared state to preserve
+    across requests.
+    """
+    return TraceRepository()
+
+
+TraceRepositoryDep = Annotated[TraceRepository, Depends(get_trace_repository)]

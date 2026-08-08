@@ -75,6 +75,72 @@ Every error in the system has a `recoverable` flag. The orchestrator uses this t
 | Auth failure | ❌ | Stop pipeline |
 | Policy not found | ❌ | Stop pipeline |
 
+### 6. Observability Is First-Class, Not an Afterthought
+
+The assignment weighs observability at 20% of evaluation — on par with
+engineering quality — because a claims decision that can't be explained is
+not acceptable in an insurance context, independent of whether it happens
+to be correct. So Phase 1 builds the trace system *before* any actual
+claims logic exists, rather than bolting logging onto agents after the
+fact. Every future agent (`ClaimValidationAgent`, `PolicyEngine`,
+`FraudAnalysisAgent`, ...) is built against this infrastructure from day
+one instead of retrofitting explainability later.
+
+**How trace context flows through the system**: a `TraceContext`
+(`trace_id` + `claim_id`) is constructed once per pipeline run and passed
+by constructor injection into a `TraceService`. Components never construct
+their own trace IDs, never reach into global state, and never invent
+free-form status strings — they call `tracer.span(TraceComponent.X)` or the
+explicit `started`/`completed`/`failed`/`warning`/`skipped` methods against
+the one `TraceService` instance the pipeline orchestrator hands them.
+
+```
+Pipeline orchestrator (Phase 2)
+    │
+    ├── TraceContext.new(claim_id)
+    │
+    ▼
+TraceService(context, sink=TraceRepository())
+    │
+    ├── injected into ── ClaimValidationAgent
+    ├── injected into ── DocumentVerificationAgent
+    ├── injected into ── PolicyEngine
+    └── injected into ── ... every future component
+```
+
+**How trace events are persisted**: `TraceService` is DB-agnostic — it
+accepts any `sink` satisfying `async def record(event)`. In production
+that's `TraceRepository`, which persists each event immediately (awaited,
+not batched) to the `trace_events` table via the existing async SQLAlchemy
+foundation. In unit tests, `TraceService` is used with no sink at all —
+events still accumulate in `.events` — so pipeline component tests never
+need a real database.
+
+**Why raw prompts/documents are not stored in the trace**: `TraceEvent.metadata`
+is designed around small, structured, summarized facts —
+`{"document_type": "PRESCRIPTION", "quality": "GOOD"}`, not the document
+image or the full LLM prompt/response. Three reasons: (1) trace rows are
+meant to be cheap to list and render in a UI — a 2MB base64 image or a
+10KB prompt per event would make that unusable; (2) full documents already
+have their own storage lifecycle (uploaded files), duplicating them into
+every trace event bloats the database for no benefit; (3) it keeps the
+redaction surface small — `redact_metadata` only has to reason about a
+handful of structured keys, not scan arbitrary prompt text for leaked
+secrets. If a future phase needs the full extracted payload for debugging,
+it belongs in a separate `extractions` table referenced by `file_id`, not
+inlined into every trace event.
+
+**How the trace supports explainability**: `GET /api/v1/claims/{claim_id}/trace`
+returns every event for a claim in chronological order (ordered by DB
+insertion sequence, not wall-clock timestamp, since two events can share a
+millisecond). For any decision, an operations user can see exactly which
+components ran, in what order, what each one attempted (`message`,
+`metadata`), whether it succeeded/failed/warned/was skipped, how confident
+it was, how long it took, and — on failure — the exact (safe) error type,
+code, and whether the pipeline was able to continue. This is the mechanism
+the assignment's "reconstruct exactly why any claim got any decision just
+from the trace" requirement is built against.
+
 ---
 
 ## Component Map
@@ -85,16 +151,17 @@ Every error in the system has a `recoverable` flag. The orchestrator uses this t
 ┌────────────────────────────────────────────────────────────────┐
 │  API Layer (FastAPI)                                           │
 │  app/api/v1/health.py   ← GET /api/v1/health                 │
+│  app/api/v1/traces.py   ← GET /api/v1/claims/{id}/trace      │
 │  app/api/deps.py        ← Dependency injection                │
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
-│  Pipeline Layer (Phase 1)                                      │
+│  Pipeline Layer (Phase 2)                                      │
 │  app/pipeline/pipeline.py  ← Multi-agent orchestrator         │
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
-│  Agent Layer (Phase 1)                                         │
+│  Agent Layer (Phase 2)                                         │
 │  app/agents/base_agent.py   ← BaseAgent(ai_provider=...)      │
 │  app/agents/validation_agent.py   ← (planned)                 │
 │  app/agents/extraction_agent.py   ← (planned)                 │
@@ -104,8 +171,16 @@ Every error in the system has a `recoverable` flag. The orchestrator uses this t
 ┌────────────────────▼───────────────────────────────────────────┐
 │  AI Layer                                                      │
 │  app/ai/providers/base.py            ← AIProvider ABC         │
+│  app/ai/providers/gemini_provider.py     ← Gemini adapter     │
 │  app/ai/providers/anthropic_provider.py  ← Anthropic adapter  │
 │  app/ai/schemas/ai_schemas.py        ← Request/response types │
+└────────────────────┬───────────────────────────────────────────┘
+                     │
+┌────────────────────▼───────────────────────────────────────────┐
+│  Tracing Layer (Phase 1)                                       │
+│  app/domain/trace.py     ← TraceEvent, TraceContext (models)  │
+│  app/tracing/service.py  ← TraceService (span/started/...)    │
+│  app/tracing/logging.py  ← Structured application logging     │
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
@@ -116,10 +191,11 @@ Every error in the system has a `recoverable` flag. The orchestrator uses this t
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
 │  Infrastructure Layer                                          │
-│  app/repositories/database.py  ← Async SQLAlchemy             │
-│  app/repositories/base.py      ← Repository ABC               │
-│  app/tracing/logging.py        ← Structured logging           │
-│  app/config/settings.py        ← Pydantic BaseSettings        │
+│  app/repositories/database.py       ← Async SQLAlchemy        │
+│  app/repositories/base.py           ← Repository ABC          │
+│  app/repositories/trace_models.py   ← TraceEventORM           │
+│  app/repositories/trace_repository.py ← TraceRepository       │
+│  app/config/settings.py             ← Pydantic BaseSettings   │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -127,15 +203,17 @@ Every error in the system has a `recoverable` flag. The orchestrator uses this t
 
 ## Database Design
 
-**Phase 0**: SQLite via aiosqlite (development default)  
-**Phase 1+**: Add ORM models for:
+**Phase 0**: SQLite via aiosqlite (development default)
+**Phase 1**: Added `trace_events` table (see `app/repositories/trace_models.py`) — one row per `TraceEvent`, ordered by autoincrement `id`, indexed on `(claim_id, id)` and `(trace_id, id)` for the two access patterns `TraceRepository` supports.
+**Phase 2+**: Add ORM models for:
 - `claims` table
 - `documents` table
 - `extractions` table
 - `decisions` table
-- `trace_events` table (claim-level observability)
 
 **Migration path**: Changing `DATABASE_URL` to a PostgreSQL `asyncpg://` URL requires no code changes. The SQLAlchemy ORM is database-agnostic.
+
+**Registration note**: SQLAlchemy declarative classes register with `Base.metadata` at import time, not at table-creation time. `init_database()` explicitly imports `app.repositories.trace_models` before calling `Base.metadata.create_all` — any future ORM module needs the same explicit import there, or its table silently won't be created.
 
 ---
 
@@ -149,7 +227,9 @@ The `AIProvider` ABC exposes three core capabilities:
 | `generate_structured()` | Extraction, classification | `AIStructuredResponse` |
 | `analyze_document()` | OCR, document type detection | `DocumentAnalysisResponse` |
 
-Structured output uses Anthropic's `tool_use` feature to guarantee JSON schema conformance.
+Structured output uses Anthropic's `tool_use` feature (or Gemini's
+`response_schema`/`response_mime_type=application/json`) to guarantee JSON
+schema conformance, depending on which provider is configured.
 
 ---
 
@@ -157,15 +237,24 @@ Structured output uses Anthropic's `tool_use` feature to guarantee JSON schema c
 
 ```
 src/
-├── App.tsx              ← Router + layout shell
-├── main.tsx             ← React entry point
-├── types/index.ts       ← TypeScript types (mirrors backend models)
-├── services/api.ts      ← API client abstraction
-├── hooks/useHealth.ts   ← Data-fetching hook
-└── pages/Dashboard.tsx  ← System health dashboard
+├── App.tsx                    ← Router + layout shell
+├── main.tsx                   ← React entry point
+├── types/index.ts             ← TypeScript types (mirrors backend models)
+├── services/api.ts            ← API client abstraction (systemApi, traceApi)
+├── hooks/useHealth.ts         ← Data-fetching hook
+├── hooks/useClaimTrace.ts     ← Data-fetching hook for claim trace events
+├── components/TraceViewer.tsx ← Reusable trace-event timeline component
+└── pages/Dashboard.tsx        ← System health dashboard
 ```
 
 All backend calls go through `services/api.ts`. Components never call `fetch()` directly.
+
+`TraceViewer` is pure presentation — it takes `events: TraceEvent[]` as a
+prop and renders them; it does not fetch data itself and has no notion of
+"claim". `useClaimTrace` is the data-fetching counterpart. Neither is
+wired into a page yet (Phase 1 scope is the reusable component/hook
+foundation, not the claim detail page that will eventually host them —
+that arrives with the claims UI in Phase 2).
 
 ---
 
@@ -176,11 +265,16 @@ Settings are loaded once via `get_settings()` (lru_cache singleton):
 ```python
 APP_ENV → Environment enum
 AI_PROVIDER → AIProvider enum → Provider factory → Concrete provider
-ANTHROPIC_API_KEY → Injected into AnthropicProvider (never hardcoded)
+ANTHROPIC_API_KEY / GEMINI_API_KEY → Injected into the concrete provider (never hardcoded)
 DATABASE_URL → SQLAlchemy engine (swappable)
 ```
 
 Per-agent model overrides are supported by passing `model` in `AIGenerateRequest` — no routing infrastructure needed yet.
+
+`.env` is resolved from the project root regardless of the process's
+working directory (see `app/config/settings.py` — `_PROJECT_ROOT_ENV_FILE`),
+so `uvicorn` behaves the same whether launched from `backend/` or the
+project root.
 
 ---
 
@@ -195,12 +289,15 @@ ClaimsSystemError subclass
     .code = "SPECIFIC_CODE"
     .details = {...}
          │
-         ▼
-Pipeline Orchestrator (Phase 1)
-    if recoverable:
-        log + skip component + lower confidence
-    else:
-        stop pipeline + return error response
+         ├──────────────────────────────┐
+         ▼                              ▼
+Pipeline Orchestrator (Phase 2)   TraceService.failed(component, exc)
+    if recoverable:                   │
+        log + skip component +        ▼
+        lower confidence          error_info_from_exception(exc)
+    else:                             │  preserves .recoverable exactly
+        stop pipeline +               ▼
+        return error response    TraceErrorInfo → persisted TraceEvent
          │
          ▼
 API Exception Handler (app/main.py)

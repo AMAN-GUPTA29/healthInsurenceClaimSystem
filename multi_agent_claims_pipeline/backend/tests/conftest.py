@@ -27,7 +27,7 @@ def reset_settings_cache(monkeypatch):
     Also removes any stray env vars that could bleed between tests.
     """
     # Remove vars that could bleed from the environment
-    for var in ("APP_ENV", "AI_PROVIDER", "ANTHROPIC_API_KEY", "DATABASE_URL",
+    for var in ("APP_ENV", "AI_PROVIDER", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "DATABASE_URL",
                 "AI_MODEL", "LOG_LEVEL", "AI_TIMEOUT_SECONDS"):
         monkeypatch.delenv(var, raising=False)
 
@@ -43,9 +43,9 @@ def test_settings():
     return Settings(
         app_env="testing",
         database_url="sqlite+aiosqlite:///./data/test_claims.db",
-        ai_provider="anthropic",
-        ai_model="claude-haiku-3-5",
-        anthropic_api_key="test-key-not-real",
+        ai_provider="gemini",
+        ai_model="gemini-2.5-flash",
+        gemini_api_key="test-key-not-real",
         log_level="DEBUG",
         debug=True,
     )
