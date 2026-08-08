@@ -127,4 +127,19 @@ describe('TraceViewer', () => {
     expect(screen.getByText(/document_type: PRESCRIPTION/)).toBeInTheDocument()
     expect(screen.getByText(/quality: GOOD/)).toBeInTheDocument()
   })
+
+  it('renders object-valued metadata as JSON, not "[object Object]"', () => {
+    render(
+      <TraceViewer
+        events={[
+          makeEvent({
+            metadata: { patient_names: { Prescription: 'Rajesh Kumar', 'Hospital Bill': 'Arjun Mehta' } },
+          }),
+        ]}
+      />
+    )
+    expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Rajesh Kumar/)).toBeInTheDocument()
+    expect(screen.getByText(/Arjun Mehta/)).toBeInTheDocument()
+  })
 })

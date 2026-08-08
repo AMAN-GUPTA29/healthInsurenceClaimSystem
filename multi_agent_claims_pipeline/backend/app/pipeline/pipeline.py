@@ -1,21 +1,301 @@
 """
-Claims Pipeline — Placeholder for Phase 1.
+Claims Pipeline — Phase 2A: claim validation, document verification,
+cross-document validation, and early stopping. No policy/decision logic
+yet — see app/policy/policy_engine.py and this module's own docstring
+history for what's still planned.
 
-The full multi-agent orchestrator will be implemented here in Phase 1.
+Planned pipeline stages (full, across all phases):
+    1.  ClaimValidationAgent         — ✅ Phase 2A
+    2.  DocumentVerificationAgent    — ✅ Phase 2A
+    3.  DocumentExtractionAgent      — (planned) full OCR/extraction beyond classification
+    4.  CrossDocumentValidationAgent — ✅ Phase 2A (patient-identity only)
+    5.  PolicyEvaluationEngine       — (planned) deterministic policy rules
+    6.  FraudAnalysisAgent           — (planned)
+    7.  FinancialCalculationService  — (planned) copay, network discount, limits
+    8.  DecisionGenerationAgent      — (planned)
+    9.  ExplanationAgent             — (planned)
+    10. TraceRecorder                — ✅ Phase 1 (TraceService, injected below)
 
-Planned pipeline stages:
-    1.  ClaimValidationAgent     — validate submission structure and member eligibility
-    2.  DocumentVerificationAgent — detect document types, check required documents
-    3.  DocumentExtractionAgent   — OCR + structured data extraction
-    4.  CrossDocumentValidationAgent — patient name matching, date consistency
-    5.  PolicyEvaluationEngine    — deterministic policy rules (NO LLM for financial calcs)
-    6.  FraudAnalysisAgent        — fraud signals, risk scoring
-    7.  FinancialCalculationService — copay, network discount, limits (deterministic)
-    8.  DecisionGenerationAgent   — synthesise final decision
-    9.  ExplanationAgent          — generate member-facing explanation
-    10. TraceRecorder             — persist full claim trace for observability
+Design — how early stopping is represented in the trace:
+Each stage's own STARTED/COMPLETED/FAILED pair reflects whether the agent
+*ran without error* — a document-verification agent that correctly finds
+a missing document has NOT failed, it succeeded at its job, so that's a
+COMPLETED event (with the verdict captured in its metadata), never FAILED.
+FAILED is reserved for genuine infrastructure/AI problems (see
+_run_stage's except-block). Skipped downstream stages get an explicit
+SKIPPED event. Exactly one PIPELINE-component event summarizes the run's
+outcome: COMPLETED (reached the end of what Phase 2A implements), WARNING
+(stopped early for an expected business reason), or FAILED (stopped
+because a stage genuinely errored). Full rationale in docs/architecture.md.
 """
 
 from __future__ import annotations
 
-# TODO Phase 1: Implement ClaimsPipeline orchestrator
+import time
+from typing import Any, Callable, Coroutine, Dict, Optional, TypeVar
+
+from app.agents.claim_validation_agent import ClaimValidationAgent
+from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
+from app.agents.document_verification_agent import DocumentVerificationAgent
+from app.domain.models import Claim, ClaimStatus
+from app.domain.trace import TraceComponent
+from app.domain.verification import (
+    CrossDocumentValidationStatus,
+    DocumentClassification,
+    DocumentVerificationStatus,
+)
+from app.tracing.service import TraceService
+
+T = TypeVar("T")
+
+
+class ClaimsPipeline:
+    """Orchestrates the Phase 2A pipeline stages for a single claim."""
+
+    def __init__(
+        self,
+        *,
+        claim_validation_agent: ClaimValidationAgent,
+        document_verification_agent: DocumentVerificationAgent,
+        cross_document_validation_agent: CrossDocumentValidationAgent,
+    ) -> None:
+        self._claim_validation_agent = claim_validation_agent
+        self._document_verification_agent = document_verification_agent
+        self._cross_document_validation_agent = cross_document_validation_agent
+
+    async def run(
+        self,
+        claim: Claim,
+        *,
+        classifications: Optional[Dict[str, DocumentClassification]] = None,
+        tracer: TraceService,
+    ) -> Claim:
+        """
+        Run claim through claim validation -> document verification ->
+        cross-document validation, stopping early on the first blocking
+        outcome. Mutates and returns `claim` with the results attached.
+
+        Guarantee: never raises. A genuine stage failure (AI timeout, parse
+        error, etc. — as opposed to an expected "blocked"/"needs
+        resubmission" business verdict) is caught, recorded in the trace as
+        FAILED, and reflected back as a degraded Claim (status=BLOCKED,
+        user_message explaining a technical error occurred) rather than
+        propagating — see module docstring and docs/architecture.md for
+        why this matters for the assignment's graceful-failure requirement.
+        """
+        classifications = classifications or {}
+        claim.trace_id = tracer.context.trace_id
+
+        t0 = time.monotonic()
+        await tracer.started(TraceComponent.PIPELINE, "Claim processing started")
+
+        # ── Stage 1: Claim Validation ────────────────────────────────────────
+        try:
+            validation_result = await self._run_stage(
+                tracer,
+                TraceComponent.CLAIM_VALIDATION,
+                lambda: self._claim_validation_agent.run(claim.submission),
+                metadata_fn=lambda r: {
+                    "valid": r.valid,
+                    "error_codes": [e.code for e in r.errors],
+                },
+            )
+        except Exception as exc:
+            return await self._degrade(
+                claim, tracer, TraceComponent.CLAIM_VALIDATION, exc, t0,
+                remaining=[TraceComponent.DOCUMENT_VERIFICATION, TraceComponent.CROSS_DOCUMENT_VALIDATION],
+            )
+        claim.validation_result = validation_result
+
+        if not validation_result.valid:
+            reason = "; ".join(e.message for e in validation_result.errors) or "claim validation failed"
+            await tracer.skipped(
+                TraceComponent.DOCUMENT_VERIFICATION, "Skipped — claim validation failed"
+            )
+            await tracer.skipped(
+                TraceComponent.CROSS_DOCUMENT_VALIDATION, "Skipped — claim validation failed"
+            )
+            await tracer.warning(
+                TraceComponent.PIPELINE,
+                f"Stopped: {reason}",
+                metadata={"stopped_at": TraceComponent.CLAIM_VALIDATION.value},
+            )
+            claim.status = ClaimStatus.BLOCKED
+            claim.stopped_at = TraceComponent.CLAIM_VALIDATION.value
+            claim.user_message = reason
+            claim.processing_time_ms = (time.monotonic() - t0) * 1000
+            return claim
+
+        # ── Stage 2: Document Verification ───────────────────────────────────
+        try:
+            doc_result = await self._run_stage(
+                tracer,
+                TraceComponent.DOCUMENT_VERIFICATION,
+                lambda: self._document_verification_agent.run(
+                    claim_category=claim.submission.claim_category,
+                    documents=claim.submission.documents,
+                    classifications=classifications,
+                ),
+                metadata_fn=lambda r: {
+                    "status": r.status.value,
+                    "missing_documents": [t.value for t in r.missing_documents],
+                    "wrong_documents": [t.value for t in r.wrong_documents],
+                    "quality_issue_count": len(r.quality_issues),
+                },
+                confidence_fn=lambda r: r.confidence,
+            )
+        except Exception as exc:
+            return await self._degrade(
+                claim, tracer, TraceComponent.DOCUMENT_VERIFICATION, exc, t0,
+                remaining=[TraceComponent.CROSS_DOCUMENT_VALIDATION],
+            )
+        claim.document_verification_result = doc_result
+        self._apply_classifications(claim, doc_result.classifications)
+
+        if doc_result.status != DocumentVerificationStatus.PASS:
+            await tracer.skipped(
+                TraceComponent.CROSS_DOCUMENT_VALIDATION,
+                f"Skipped — document verification {doc_result.status.value.lower()}",
+            )
+            await tracer.warning(
+                TraceComponent.PIPELINE,
+                f"Stopped: document verification {doc_result.status.value.lower()}",
+                metadata={
+                    "stopped_at": TraceComponent.DOCUMENT_VERIFICATION.value,
+                    "status": doc_result.status.value,
+                },
+            )
+            claim.status = (
+                ClaimStatus.DOCUMENTS_PENDING
+                if doc_result.status == DocumentVerificationStatus.NEEDS_RESUBMISSION
+                else ClaimStatus.BLOCKED
+            )
+            claim.stopped_at = TraceComponent.DOCUMENT_VERIFICATION.value
+            claim.user_message = doc_result.user_message
+            claim.processing_time_ms = (time.monotonic() - t0) * 1000
+            return claim
+
+        # ── Stage 3: Cross-Document Validation ──────────────────────────────
+        try:
+            cross_result = await self._run_stage(
+                tracer,
+                TraceComponent.CROSS_DOCUMENT_VALIDATION,
+                lambda: self._cross_document_validation_agent.run(doc_result.classifications),
+                metadata_fn=lambda r: {"status": r.status.value, "patient_names": r.patient_names},
+                confidence_fn=lambda r: r.confidence,
+            )
+        except Exception as exc:
+            return await self._degrade(
+                claim, tracer, TraceComponent.CROSS_DOCUMENT_VALIDATION, exc, t0, remaining=[],
+            )
+        claim.cross_document_validation_result = cross_result
+
+        if cross_result.status != CrossDocumentValidationStatus.PASS:
+            await tracer.warning(
+                TraceComponent.PIPELINE,
+                "Stopped: cross-document validation failed",
+                metadata={"stopped_at": TraceComponent.CROSS_DOCUMENT_VALIDATION.value},
+            )
+            claim.status = ClaimStatus.BLOCKED
+            claim.stopped_at = TraceComponent.CROSS_DOCUMENT_VALIDATION.value
+            claim.user_message = cross_result.user_message
+            claim.processing_time_ms = (time.monotonic() - t0) * 1000
+            return claim
+
+        # ── End of Phase 2A ───────────────────────────────────────────────────
+        await tracer.completed(
+            TraceComponent.PIPELINE,
+            message="Reached end of Phase 2A pipeline — policy evaluation and decision are not yet implemented",
+            duration_ms=(time.monotonic() - t0) * 1000,
+        )
+        claim.status = ClaimStatus.PROCESSING
+        claim.stopped_at = None
+        claim.user_message = "All early checks passed. Policy evaluation is not yet implemented."
+        claim.processing_time_ms = (time.monotonic() - t0) * 1000
+        return claim
+
+    # ── Internal ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _apply_classifications(claim: Claim, classifications) -> None:
+        """
+        Write DocumentVerificationAgent's findings back onto claim.documents
+        (detected_type/quality) so the API response and persisted rows
+        reflect what was actually determined about each document — not
+        just what the member declared (which real submissions may not set
+        at all).
+        """
+        by_file_id = {c.file_id: c for c in classifications}
+        for doc in claim.documents:
+            classification = by_file_id.get(doc.metadata.file_id)
+            if classification is not None:
+                doc.metadata.detected_type = classification.document_type
+                doc.metadata.quality = classification.quality
+
+    async def _degrade(
+        self,
+        claim: Claim,
+        tracer: TraceService,
+        failed_component: TraceComponent,
+        exc: Exception,
+        t0: float,
+        *,
+        remaining: list[TraceComponent],
+    ) -> Claim:
+        """
+        Convert a genuine stage failure into a degraded (but still
+        returned, never raised) Claim. `_run_stage` has already recorded
+        the FAILED event for `failed_component`; this records SKIPPED for
+        anything downstream and one PIPELINE-level FAILED event, then
+        returns a claim an ops user can still look up and understand.
+        """
+        for component in remaining:
+            await tracer.skipped(
+                component, f"Skipped — {failed_component.value} failed with a technical error"
+            )
+        await tracer.failed(
+            TraceComponent.PIPELINE,
+            exc,
+            message=f"Stopped: {failed_component.value} failed unexpectedly",
+            duration_ms=(time.monotonic() - t0) * 1000,
+        )
+        claim.status = ClaimStatus.BLOCKED
+        claim.stopped_at = failed_component.value
+        claim.user_message = (
+            "We hit a technical problem while processing your claim and could not finish "
+            f"{failed_component.value.replace('_', ' ').title()}. Your claim has been saved — "
+            "please try again later or contact support if this continues."
+        )
+        claim.processing_time_ms = (time.monotonic() - t0) * 1000
+        return claim
+
+    async def _run_stage(
+        self,
+        tracer: TraceService,
+        component: TraceComponent,
+        coro_factory: Callable[[], Coroutine[Any, Any, T]],
+        *,
+        metadata_fn: Callable[[T], Dict[str, Any]],
+        confidence_fn: Optional[Callable[[T], Optional[float]]] = None,
+    ) -> T:
+        """
+        Run one stage with STARTED/COMPLETED-with-metadata/FAILED trace
+        events. A stage that runs to completion (even with a "blocked"
+        business verdict) is COMPLETED; only an actual raised exception
+        (AI timeout, parse error, etc.) is FAILED.
+        """
+        t0 = time.monotonic()
+        await tracer.started(component)
+        try:
+            result = await coro_factory()
+        except Exception as exc:
+            await tracer.failed(component, exc, duration_ms=(time.monotonic() - t0) * 1000)
+            raise
+        else:
+            await tracer.completed(
+                component,
+                duration_ms=(time.monotonic() - t0) * 1000,
+                metadata=metadata_fn(result),
+                confidence=confidence_fn(result) if confidence_fn else None,
+            )
+            return result

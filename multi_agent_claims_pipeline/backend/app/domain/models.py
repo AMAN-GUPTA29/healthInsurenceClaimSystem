@@ -61,7 +61,8 @@ class ClaimStatus(str, Enum):
 
     SUBMITTED = "SUBMITTED"
     VALIDATING = "VALIDATING"
-    DOCUMENTS_PENDING = "DOCUMENTS_PENDING"  # Waiting for member to resubmit docs
+    BLOCKED = "BLOCKED"  # Stopped before a decision; member action needed (not just re-upload)
+    DOCUMENTS_PENDING = "DOCUMENTS_PENDING"  # Waiting for member to resubmit a specific document
     PROCESSING = "PROCESSING"
     AWAITING_REVIEW = "AWAITING_REVIEW"
     DECIDED = "DECIDED"
@@ -81,8 +82,9 @@ class DocumentQuality(str, Enum):
     """Quality assessment of an uploaded document."""
 
     GOOD = "GOOD"
-    DEGRADED = "DEGRADED"  # Readable but imperfect (shadows, slight blur)
-    UNREADABLE = "UNREADABLE"  # Cannot be parsed
+    LOW_QUALITY = "LOW_QUALITY"  # Readable but imperfect (shadows, slight blur)
+    PARTIAL = "PARTIAL"  # Some fields readable, others cut off/obscured
+    UNREADABLE = "UNREADABLE"  # Cannot be parsed at all
     UNKNOWN = "UNKNOWN"
 
 
@@ -345,10 +347,29 @@ class ClaimDecision(BaseModel):
     processing_time_ms: Optional[float] = None
 
 
+# app.domain.verification imports DocumentType/DocumentQuality from this module.
+# Importing it here (mid-file, after those enums are already defined, rather
+# than at the top of the file) lets Claim reference its result types directly
+# without a forward-ref/model_rebuild dance — Python resolves this safely
+# because app.domain.models is already partially initialised (with the names
+# verification.py needs) by the time this import runs.
+from app.domain.verification import (  # noqa: E402
+    CrossDocumentValidationResult,
+    DocumentVerificationResult,
+    ValidationResult,
+)
+
+
 class Claim(BaseModel):
     """
     Full claim record, enriched through pipeline processing.
     Combines the original submission with processed data.
+
+    Phase 2A fields (trace_id, *_result, user_message, stopped_at) are
+    populated by ClaimsPipeline as the claim moves through claim
+    validation, document verification, and cross-document validation.
+    They stay None until that stage has actually run — a None
+    `document_verification_result` means "not reached yet", not "passed".
     """
 
     claim_id: str = Field(default_factory=lambda: f"CLM-{uuid4().hex[:8].upper()}")
@@ -357,6 +378,16 @@ class Claim(BaseModel):
     documents: List[Document] = Field(default_factory=list)
     member: Optional[Member] = None
     decision: Optional[ClaimDecision] = None
+
+    # ── Phase 2A: early pipeline stages ─────────────────────────────────────
+    trace_id: Optional[str] = None
+    stopped_at: Optional[str] = None  # TraceComponent value where processing stopped, if any
+    user_message: Optional[str] = None
+    validation_result: Optional[ValidationResult] = None
+    document_verification_result: Optional[DocumentVerificationResult] = None
+    cross_document_validation_result: Optional[CrossDocumentValidationResult] = None
+    processing_time_ms: Optional[float] = None
+
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

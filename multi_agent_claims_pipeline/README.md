@@ -8,7 +8,7 @@
 
 This system processes health insurance OPD claims through a multi-agent AI pipeline. Each claim passes through document verification, extraction, policy evaluation, fraud analysis, financial calculation, and decision generation.
 
-**Current Status: Phase 0 — Foundation & Architecture**
+**Current Status: Phase 2A — Claim Foundation & Early Document Verification**
 
 ---
 
@@ -181,23 +181,29 @@ python -m pytest --cov=app --cov-report=html
 - [x] Docker setup
 - [x] Documentation
 
-### 🔲 Phase 1 — Planned
-- [ ] Document verification agent
-- [ ] Document extraction agent (OCR)
-- [ ] Cross-document validation
-- [ ] Policy evaluation engine
+### ✅ Phase 1 — Complete
+- [x] Trace domain models, `TraceService`, `TraceRepository`
+- [x] `GET /api/v1/claims/{claim_id}/trace`
+- [x] Reusable `TraceViewer` frontend component
+
+### ✅ Phase 2A — Complete
+- [x] `ClaimValidationAgent` — member, policy, category, minimum amount
+- [x] `DocumentVerificationAgent` — required-document checks + real AI classification
+- [x] `CrossDocumentValidationAgent` — patient-identity matching
+- [x] `ClaimsPipeline` — orchestration, early stopping, graceful degradation on AI/infra failure
+- [x] `POST /api/v1/claims`, `GET /api/v1/claims/{claim_id}`
+- [x] Claim submission + detail pages (detail page mounts `TraceViewer`)
+- [x] Evaluation runner — TC001/TC002/TC003 all pass through the real pipeline (`scripts/run_eval.py`)
+- [ ] Document extraction agent (OCR) — classification only so far, no full extraction
+- [ ] Policy evaluation engine, financial calculation, fraud analysis, decision generation, explanation agent
+
+### 🔲 Phase 2B / 3 — Planned
+- [ ] Policy evaluation engine (coverage, waiting periods, exclusions, co-pay, network discount)
 - [ ] Financial calculation service
 - [ ] Fraud analysis agent
-- [ ] Decision generation
-- [ ] Explanation agent
-- [ ] Full claim processing endpoint
-- [ ] Claims UI (submission + status)
-
-### 🔲 Phase 2 — Planned
-- [ ] 12-case evaluation runner
-- [ ] eval-report.md generation
-- [ ] Full trace/observability
-- [ ] PDF generation for decisions
+- [ ] Decision generation + explanation agent
+- [ ] Remaining 9 test cases (TC004–TC012) + `eval-report.md`
+- [ ] Real file upload + multimodal document understanding
 - [ ] Deployment
 
 ---

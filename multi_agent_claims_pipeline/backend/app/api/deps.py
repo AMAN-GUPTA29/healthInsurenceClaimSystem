@@ -16,10 +16,17 @@ from typing import Annotated
 
 from fastapi import Depends
 
+from app.agents.claim_validation_agent import ClaimValidationAgent
+from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
+from app.agents.document_verification_agent import DocumentVerificationAgent
 from app.ai.providers.base import AIProvider
 from app.ai.providers.factory import create_ai_provider
 from app.config.settings import Settings, get_settings
+from app.pipeline.pipeline import ClaimsPipeline
+from app.policy.policy_repository import PolicyRepository
+from app.repositories.claim_repository import ClaimRepository
 from app.repositories.trace_repository import TraceRepository
+from app.services.document_input_adapter import DocumentInputAdapter
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -71,3 +78,59 @@ def get_trace_repository() -> TraceRepository:
 
 
 TraceRepositoryDep = Annotated[TraceRepository, Depends(get_trace_repository)]
+
+
+# ── Claim Foundation (Phase 2A) ─────────────────────────────────────────────
+
+
+@lru_cache(maxsize=1)
+def _get_policy_repository_singleton() -> PolicyRepository:
+    """
+    Cached singleton: policy_terms.json is read once and reused, mirroring
+    the AI provider / settings singleton pattern above.
+    """
+    return PolicyRepository(get_settings().policy_file_path)
+
+
+def get_policy_repository() -> PolicyRepository:
+    return _get_policy_repository_singleton()
+
+
+PolicyRepositoryDep = Annotated[PolicyRepository, Depends(get_policy_repository)]
+
+
+def get_claim_repository() -> ClaimRepository:
+    """Not cached — same reasoning as get_trace_repository (stateless)."""
+    return ClaimRepository()
+
+
+ClaimRepositoryDep = Annotated[ClaimRepository, Depends(get_claim_repository)]
+
+
+def get_document_input_adapter() -> DocumentInputAdapter:
+    return DocumentInputAdapter()
+
+
+DocumentInputAdapterDep = Annotated[DocumentInputAdapter, Depends(get_document_input_adapter)]
+
+
+def get_claims_pipeline(
+    ai_provider: AIProviderDep,
+    policy_repository: PolicyRepositoryDep,
+) -> ClaimsPipeline:
+    """
+    Builds a fresh ClaimsPipeline per request. Agents are cheap, stateless
+    objects (all real state — the AI provider, the loaded policy — is
+    injected, not owned), so there's no benefit to caching the pipeline
+    itself the way the AI provider/policy repository are cached.
+    """
+    return ClaimsPipeline(
+        claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
+        document_verification_agent=DocumentVerificationAgent(
+            ai_provider=ai_provider, policy_repository=policy_repository
+        ),
+        cross_document_validation_agent=CrossDocumentValidationAgent(),
+    )
+
+
+ClaimsPipelineDep = Annotated[ClaimsPipeline, Depends(get_claims_pipeline)]

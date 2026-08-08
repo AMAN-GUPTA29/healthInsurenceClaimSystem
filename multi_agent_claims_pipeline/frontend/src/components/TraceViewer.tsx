@@ -66,6 +66,16 @@ function ErrorDetails({ error }: { error: TraceErrorInfo }) {
   )
 }
 
+function formatMetadataValue(value: unknown): string {
+  if (value === null || value === undefined) return String(value)
+  if (typeof value === 'object') {
+    // Arrays/objects (e.g. {"Prescription": "Rajesh Kumar"}) — render as
+    // compact JSON rather than the useless "[object Object]".
+    return Array.isArray(value) && value.length === 0 ? '[]' : JSON.stringify(value)
+  }
+  return String(value)
+}
+
 function MetadataChips({ metadata }: { metadata: Record<string, unknown> }) {
   const entries = Object.entries(metadata)
   if (entries.length === 0) return null
@@ -83,7 +93,7 @@ function MetadataChips({ metadata }: { metadata: Record<string, unknown> }) {
             padding: '2px 8px',
           }}
         >
-          {key}: {String(value)}
+          {key}: {formatMetadataValue(value)}
         </span>
       ))}
     </div>

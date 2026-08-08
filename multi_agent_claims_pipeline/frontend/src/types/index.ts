@@ -36,11 +36,14 @@ export type DecisionType =
 export type ClaimStatus =
   | 'SUBMITTED'
   | 'VALIDATING'
+  | 'BLOCKED'
   | 'DOCUMENTS_PENDING'
   | 'PROCESSING'
   | 'AWAITING_REVIEW'
   | 'DECIDED'
   | 'CLOSED'
+
+export type DocumentQuality = 'GOOD' | 'LOW_QUALITY' | 'PARTIAL' | 'UNREADABLE' | 'UNKNOWN'
 
 export type RejectionReason =
   | 'WAITING_PERIOD'
@@ -83,7 +86,7 @@ export interface DocumentMetadata {
   size_bytes?: number
   declared_type?: DocumentType
   detected_type?: DocumentType
-  quality: 'GOOD' | 'DEGRADED' | 'UNREADABLE' | 'UNKNOWN'
+  quality: DocumentQuality
   uploaded_at: string
 }
 
@@ -140,6 +143,112 @@ export interface ClaimDecision {
   fraud_signals: string[]
   decided_at: string
   processing_time_ms?: number
+}
+
+// ── Claim Processing (Phase 2A) ──────────────────────────────────────────────
+//
+// Mirrors app/domain/verification.py and app/api/v1/schemas.py. No final
+// decision fields here yet — APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW are
+// later phases.
+
+export interface ValidationIssue {
+  code: string
+  message: string
+  field?: string
+  recoverable: boolean
+}
+
+export interface ValidationResult {
+  valid: boolean
+  errors: ValidationIssue[]
+  warnings: ValidationIssue[]
+}
+
+export type DocumentVerificationStatus = 'PASS' | 'BLOCKED' | 'NEEDS_RESUBMISSION'
+
+export interface DocumentClassification {
+  file_id: string
+  document_type: DocumentType
+  quality: DocumentQuality
+  patient_name?: string
+  confidence?: number
+  source: 'ai' | 'fixture'
+}
+
+export interface DocumentVerificationResult {
+  status: DocumentVerificationStatus
+  required_documents: DocumentType[]
+  received_documents: DocumentType[]
+  missing_documents: DocumentType[]
+  wrong_documents: DocumentType[]
+  quality_issues: DocumentClassification[]
+  classifications: DocumentClassification[]
+  user_message: string
+  confidence?: number
+}
+
+export type CrossDocumentValidationStatus = 'PASS' | 'BLOCKED'
+
+export interface CrossDocumentValidationResult {
+  status: CrossDocumentValidationStatus
+  patient_names: Record<string, string>
+  user_message: string
+  confidence?: number
+}
+
+// ── Claim submission request ──────────────────────────────────────────────────
+//
+// A real submission only sets file_id/file_name/declared_type. The
+// actual_type/quality/patient_name_on_doc fields exist so the evaluation
+// layer can pass fixture ground truth through this same shape — see
+// backend app/services/document_input_adapter.py.
+
+export interface ClaimDocumentInput {
+  file_id: string
+  file_name?: string
+  declared_type?: DocumentType
+  actual_type?: DocumentType
+  quality?: DocumentQuality
+  patient_name_on_doc?: string
+}
+
+export interface ClaimSubmissionRequest {
+  member_id: string
+  policy_id: string
+  claim_category: ClaimCategory
+  treatment_date: string
+  claimed_amount: number
+  hospital_name?: string
+  ytd_claims_amount?: number
+  documents: ClaimDocumentInput[]
+  simulate_component_failure?: boolean
+}
+
+export interface ClaimDocumentSummary {
+  file_id: string
+  file_name?: string
+  document_type?: DocumentType
+  quality?: DocumentQuality
+}
+
+export interface ClaimResponse {
+  claim_id: string
+  member_id: string
+  policy_id: string
+  claim_category: ClaimCategory
+  treatment_date: string
+  claimed_amount: number
+  status: ClaimStatus
+  trace_id?: string
+  stopped_at?: string
+  user_message?: string
+  processing_time_ms?: number
+  documents: ClaimDocumentSummary[]
+  validation_result?: ValidationResult
+  document_verification_result?: DocumentVerificationResult
+  cross_document_validation_result?: CrossDocumentValidationResult
+  created_at: string
+  updated_at: string
 }
 
 // ── Trace / Observability ────────────────────────────────────────────────────

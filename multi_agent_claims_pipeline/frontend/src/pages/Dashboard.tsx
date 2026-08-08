@@ -95,9 +95,9 @@ export function Dashboard() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' as const }}>
-          <Badge variant="default">Phase 0 — Foundation</Badge>
+          <Badge variant="default">Phase 2A — Claim Foundation</Badge>
           <Badge variant="success">Backend Active</Badge>
-          <Badge variant="warning">Phase 1 Pending</Badge>
+          <Badge variant="warning">Policy Evaluation Pending</Badge>
         </div>
       </div>
 
@@ -203,20 +203,20 @@ export function Dashboard() {
         </h2>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
           {[
-            { step: 1, name: 'Claim Validation', status: 'planned', icon: '✅' },
-            { step: 2, name: 'Document Verification', status: 'planned', icon: '📋' },
+            { step: 1, name: 'Claim Validation', status: 'live', icon: '✅' },
+            { step: 2, name: 'Document Verification', status: 'live', icon: '📋' },
             { step: 3, name: 'Data Extraction', status: 'planned', icon: '🔍' },
-            { step: 4, name: 'Cross-Doc Validation', status: 'planned', icon: '🔗' },
+            { step: 4, name: 'Cross-Doc Validation', status: 'live', icon: '🔗' },
             { step: 5, name: 'Policy Evaluation', status: 'planned', icon: '📜' },
             { step: 6, name: 'Fraud Analysis', status: 'planned', icon: '🛡️' },
             { step: 7, name: 'Financial Calculation', status: 'planned', icon: '💰' },
             { step: 8, name: 'Decision Generation', status: 'planned', icon: '⚖️' },
             { step: 9, name: 'Explanation', status: 'planned', icon: '💬' },
-            { step: 10, name: 'Trace & Observability', status: 'planned', icon: '📊' },
-          ].map(({ step, name, icon }) => (
+            { step: 10, name: 'Trace & Observability', status: 'live', icon: '📊' },
+          ].map(({ step, name, icon, status }) => (
             <div key={step} style={{
               background: 'rgba(15, 23, 42, 0.5)',
-              border: '1px solid rgba(51, 65, 85, 0.6)',
+              border: `1px solid ${status === 'live' ? 'rgba(34, 197, 94, 0.35)' : 'rgba(51, 65, 85, 0.6)'}`,
               borderRadius: '10px',
               padding: '12px 14px',
               display: 'flex',
@@ -224,8 +224,8 @@ export function Dashboard() {
               gap: '10px',
             }}>
               <div style={{
-                background: 'rgba(99, 102, 241, 0.15)',
-                border: '1px solid rgba(99, 102, 241, 0.3)',
+                background: status === 'live' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(99, 102, 241, 0.15)',
+                border: `1px solid ${status === 'live' ? 'rgba(34, 197, 94, 0.3)' : 'rgba(99, 102, 241, 0.3)'}`,
                 borderRadius: '6px',
                 width: '28px',
                 height: '28px',
@@ -234,7 +234,7 @@ export function Dashboard() {
                 justifyContent: 'center',
                 fontSize: '11px',
                 fontWeight: 700,
-                color: '#a5b4fc',
+                color: status === 'live' ? '#86efac' : '#a5b4fc',
                 flexShrink: 0,
               }}>
                 {step}
@@ -243,8 +243,8 @@ export function Dashboard() {
                 <div style={{ fontSize: '13px', color: '#cbd5e1', fontWeight: 500 }}>
                   {icon} {name}
                 </div>
-                <div style={{ fontSize: '11px', color: '#475569', marginTop: '2px' }}>
-                  Phase 1+
+                <div style={{ fontSize: '11px', color: status === 'live' ? '#4ade80' : '#475569', marginTop: '2px' }}>
+                  {status === 'live' ? 'Live — Phase 2A' : 'Planned'}
                 </div>
               </div>
             </div>

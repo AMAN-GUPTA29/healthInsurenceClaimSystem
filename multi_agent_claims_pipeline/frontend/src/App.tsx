@@ -4,6 +4,8 @@
 
 import { BrowserRouter, Navigate, Route, Routes, NavLink } from 'react-router-dom'
 import { Dashboard } from './pages/Dashboard'
+import { ClaimSubmission } from './pages/ClaimSubmission'
+import { ClaimDetail } from './pages/ClaimDetail'
 
 // ── Global CSS Variables & Reset ──────────────────────────────────────────────
 const globalStyles = `
@@ -119,10 +121,14 @@ function Sidebar() {
             </div>
           )}
         </NavLink>
-        {/* Phase 1 placeholders */}
-        <div style={{ ...linkStyle(false), opacity: 0.4, cursor: 'not-allowed' as const }}>
-          <span>📝</span> Submit Claim
-        </div>
+        <NavLink to="/claims/new">
+          {({ isActive }) => (
+            <div style={linkStyle(isActive)}>
+              <span>📝</span> Submit Claim
+            </div>
+          )}
+        </NavLink>
+        {/* Phase 3+ placeholders */}
         <div style={{ ...linkStyle(false), opacity: 0.4, cursor: 'not-allowed' as const }}>
           <span>📋</span> Claim History
         </div>
@@ -141,8 +147,8 @@ function Sidebar() {
         fontSize: '12px',
         color: '#64748b',
       }}>
-        <div style={{ color: '#a5b4fc', fontWeight: 600, marginBottom: '4px' }}>Phase 0</div>
-        Foundation & Architecture
+        <div style={{ color: '#a5b4fc', fontWeight: 600, marginBottom: '4px' }}>Phase 2A</div>
+        Claim Foundation & Document Verification
       </div>
     </aside>
   )
@@ -170,6 +176,8 @@ export default function App() {
           }}>
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/claims/new" element={<ClaimSubmission />} />
+              <Route path="/claims/:claimId" element={<ClaimDetail />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>

@@ -2,8 +2,9 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import health, traces
+from app.api.v1 import claims, health, traces
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(health.router)
 router.include_router(traces.router)
+router.include_router(claims.router)

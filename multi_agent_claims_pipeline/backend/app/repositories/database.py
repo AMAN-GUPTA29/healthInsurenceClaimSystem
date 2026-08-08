@@ -75,7 +75,7 @@ async def init_database(database_url: str) -> None:
     # Import ORM modules so their classes register with Base.metadata before
     # create_all runs. Declarative registration happens at class-definition
     # time, so each ORM module must be imported at least once before this call.
-    from app.repositories import trace_models  # noqa: F401
+    from app.repositories import claim_models, trace_models  # noqa: F401
 
     # Create all tables defined in ORM models
     async with _engine.begin() as conn:

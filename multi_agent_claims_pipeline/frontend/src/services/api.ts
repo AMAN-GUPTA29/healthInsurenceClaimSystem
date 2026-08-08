@@ -10,7 +10,13 @@
  * - Errors are wrapped in APIError for consistent handling
  */
 
-import type { APIError, ClaimTraceResponse, HealthResponse } from '../types'
+import type {
+  APIError,
+  ClaimResponse,
+  ClaimSubmissionRequest,
+  ClaimTraceResponse,
+  HealthResponse,
+} from '../types'
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -72,10 +78,21 @@ export const traceApi = {
     request<ClaimTraceResponse>(`/api/v1/claims/${encodeURIComponent(claimId)}/trace`),
 }
 
-// ── Claims Endpoints (Phase 2) ────────────────────────────────────────────────
+// ── Claims Endpoints (Phase 2A) ─────────────────────────────────────────────
+//
+// Phase 2A only covers claim validation, document verification, and
+// cross-document validation — a claim that clears all three comes back
+// with status "PROCESSING" and no decision yet.
 
-// TODO Phase 2: Add claims submission and status endpoints
-// export const claimsApi = { ... }
+export const claimsApi = {
+  submit: (submission: ClaimSubmissionRequest): Promise<ClaimResponse> =>
+    request<ClaimResponse>('/api/v1/claims', {
+      method: 'POST',
+      body: JSON.stringify(submission),
+    }),
+  get: (claimId: string): Promise<ClaimResponse> =>
+    request<ClaimResponse>(`/api/v1/claims/${encodeURIComponent(claimId)}`),
+}
 
 export { APIClientError }
 export type { APIError }

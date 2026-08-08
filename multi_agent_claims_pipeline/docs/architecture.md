@@ -143,6 +143,102 @@ from the trace" requirement is built against.
 
 ---
 
+## Claim Processing Flow (Phase 2A)
+
+Phase 2A implements the first three real pipeline stages — claim
+validation, document verification, cross-document validation — and
+deliberately stops there. No policy evaluation, financial calculation, or
+decision (APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW) exists yet.
+
+```
+POST /api/v1/claims
+        │
+        ▼
+DocumentInputAdapter.to_domain(request)
+        │  → (ClaimSubmission, {file_id: DocumentClassification})
+        ▼
+ClaimsPipeline.run(claim, classifications, tracer)
+        │
+        ├─▶ ClaimValidationAgent            (member, policy, category, amount)
+        │       │ invalid → stop, status=BLOCKED
+        │       ▼
+        ├─▶ DocumentVerificationAgent       (required docs from PolicyRepository;
+        │       │                            AI-classifies any document without a
+        │       │                            pre-supplied classification)
+        │       │ NEEDS_RESUBMISSION → stop, status=DOCUMENTS_PENDING
+        │       │ BLOCKED            → stop, status=BLOCKED
+        │       ▼
+        └─▶ CrossDocumentValidationAgent    (patient-identity match across
+                │                            already-extracted names)
+                │ BLOCKED → stop, status=BLOCKED
+                ▼
+        status=PROCESSING ("Phase 2A cleared, policy evaluation not yet implemented")
+```
+
+### Claim validation
+`ClaimValidationAgent` is purely deterministic (`ai_provider=None`) — member
+existence and policy ID come from `PolicyRepository` (backed by
+`policy_terms.json`, never hardcoded); category and minimum-amount checks
+follow the same rule. It never raises for an expected failure; it always
+returns a `ValidationResult(valid, errors, warnings)` and the pipeline
+decides whether that's a stop.
+
+### Document verification
+`DocumentVerificationAgent` is the one place a real AI call happens in
+Phase 2A. For each document, it uses a pre-supplied `DocumentClassification`
+if one exists (see "Real vs. fixture input" below) — otherwise it calls the
+injected `AIProvider.generate_structured()` with the prompt/schema in
+`app/ai/prompts/document_verification.py`. Required/optional document types
+per category come from `PolicyRepository.get_document_requirements()`,
+never a Python `if category == "CONSULTATION"` branch. The `user_message`
+returned to the member is generated from the structured result (counts of
+what was uploaded, what's missing, what's unreadable) — the same code
+produces TC001's and TC002's very different messages; nothing is
+hardcoded per test case.
+
+### Cross-document validation
+`CrossDocumentValidationAgent` is also purely deterministic — it compares
+patient names `DocumentVerificationAgent` already extracted (or the
+fixture already supplied). It never re-reads a document and never calls
+AI itself; if the classification step got the name wrong, that's a
+document-verification-quality problem, not a cross-document one.
+
+### Real vs. fixture input — one boundary, not two systems
+`DocumentInputAdapter` is the single place that decides whether a document
+already has ground truth (`actual_type`/`quality`/`patient_name_on_doc`,
+which the evaluation runner supplies from `test_cases.json`) or needs a
+real AI classification (a real API submission, which only ever sets
+`declared_type`). Both cases produce the exact same
+`(ClaimSubmission, Dict[str, DocumentClassification])` shape that
+`ClaimsPipeline` consumes — no agent branches on "is this a test case."
+This is deliberately the same pattern as the AI provider abstraction:
+swap what's behind the boundary, not the code that consumes it.
+
+### Early stopping, in the trace
+See "Observability" above for the full event-type rationale. Concretely,
+for TC001 (missing document): `CLAIM_VALIDATION` STARTED→COMPLETED,
+`DOCUMENT_VERIFICATION` STARTED→COMPLETED (metadata `status: BLOCKED`),
+`CROSS_DOCUMENT_VALIDATION` SKIPPED, `PIPELINE` WARNING. No
+`DECISION_GENERATION` event is ever emitted — Phase 2A doesn't reach it,
+and the trace shows that honestly by omission rather than a fabricated
+"NOT_RUN" event.
+
+### Failure handling (AI/infra failures vs. expected business outcomes)
+A document verification agent that correctly finds a missing document has
+not failed — it did its job. `FAILED` trace events and raised exceptions
+are reserved for genuine problems: AI timeout, rate limit, or an
+unparseable structured response (`ExtractionError`). `ClaimsPipeline`
+catches these per-stage, records `FAILED` (with safe, structured error
+info — never a stack trace or the API key), marks downstream stages
+`SKIPPED`, and returns a degraded but valid `Claim`
+(`status=BLOCKED`, an explanatory `user_message`) instead of raising or
+crashing the request. Verified live against the real Gemini API with an
+invalid key (see `docs/AI_HANDOFF.md`): the request reached Google's
+servers, was rejected for auth, and the whole chain — trace, persisted
+claim, HTTP response — degraded exactly as designed.
+
+---
+
 ## Component Map
 
 ### Backend Layers
@@ -152,20 +248,29 @@ from the trace" requirement is built against.
 │  API Layer (FastAPI)                                           │
 │  app/api/v1/health.py   ← GET /api/v1/health                 │
 │  app/api/v1/traces.py   ← GET /api/v1/claims/{id}/trace      │
+│  app/api/v1/claims.py   ← POST /claims, GET /claims/{id}     │
+│  app/api/v1/schemas.py  ← ClaimResponse (API contract)        │
 │  app/api/deps.py        ← Dependency injection                │
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
-│  Pipeline Layer (Phase 2)                                      │
-│  app/pipeline/pipeline.py  ← Multi-agent orchestrator         │
+│  Services Layer (Phase 2A)                                     │
+│  app/services/document_input_adapter.py                        │
+│      ← DocumentInputAdapter: request -> (Claim, classifications)│
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
-│  Agent Layer (Phase 2)                                         │
-│  app/agents/base_agent.py   ← BaseAgent(ai_provider=...)      │
-│  app/agents/validation_agent.py   ← (planned)                 │
-│  app/agents/extraction_agent.py   ← (planned)                 │
-│  ...                                                           │
+│  Pipeline Layer (Phase 2A)                                      │
+│  app/pipeline/pipeline.py  ← ClaimsPipeline orchestrator       │
+└────────────────────┬───────────────────────────────────────────┘
+                     │
+┌────────────────────▼───────────────────────────────────────────┐
+│  Agent Layer (Phase 2A)                                         │
+│  app/agents/base_agent.py   ← BaseAgent(ai_provider=None|AI)  │
+│  app/agents/claim_validation_agent.py                          │
+│  app/agents/document_verification_agent.py                     │
+│  app/agents/cross_document_validation_agent.py                 │
+│  (extraction_agent, fraud_analysis_agent, ... ← planned)       │
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
@@ -174,6 +279,7 @@ from the trace" requirement is built against.
 │  app/ai/providers/gemini_provider.py     ← Gemini adapter     │
 │  app/ai/providers/anthropic_provider.py  ← Anthropic adapter  │
 │  app/ai/schemas/ai_schemas.py        ← Request/response types │
+│  app/ai/prompts/document_verification.py ← classification prompt│
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
@@ -184,18 +290,23 @@ from the trace" requirement is built against.
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
-│  Domain Layer                                                  │
-│  app/domain/models.py   ← Claim, Member, Document, Decision   │
-│  app/domain/errors.py   ← Error hierarchy                     │
+│  Domain / Policy Layer                                          │
+│  app/domain/models.py        ← Claim, Member, Document        │
+│  app/domain/verification.py  ← Validation/Verification results│
+│  app/domain/errors.py        ← Error hierarchy                │
+│  app/policy/policy_repository.py ← PolicyRepository (Phase 2A)│
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
 │  Infrastructure Layer                                          │
-│  app/repositories/database.py       ← Async SQLAlchemy        │
-│  app/repositories/base.py           ← Repository ABC          │
-│  app/repositories/trace_models.py   ← TraceEventORM           │
+│  app/repositories/database.py         ← Async SQLAlchemy      │
+│  app/repositories/base.py             ← Repository ABC        │
+│  app/repositories/trace_models.py     ← TraceEventORM         │
 │  app/repositories/trace_repository.py ← TraceRepository       │
-│  app/config/settings.py             ← Pydantic BaseSettings   │
+│  app/repositories/claim_models.py     ← ClaimORM, ClaimDocumentORM │
+│  app/repositories/claim_repository.py ← ClaimRepository       │
+│  app/config/settings.py               ← Pydantic BaseSettings │
+│  app/config/paths.py                  ← Source-file resolution│
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -205,9 +316,8 @@ from the trace" requirement is built against.
 
 **Phase 0**: SQLite via aiosqlite (development default)
 **Phase 1**: Added `trace_events` table (see `app/repositories/trace_models.py`) — one row per `TraceEvent`, ordered by autoincrement `id`, indexed on `(claim_id, id)` and `(trace_id, id)` for the two access patterns `TraceRepository` supports.
-**Phase 2+**: Add ORM models for:
-- `claims` table
-- `documents` table
+**Phase 2A**: Added `claims` (one row per claim; validation/verification results stored as JSON columns, same pattern as `trace_events.metadata_json`) and `claim_documents` (child rows keyed by `claim_id`) — see `app/repositories/claim_models.py`.
+**Phase 2B/3**: Add ORM models for:
 - `extractions` table
 - `decisions` table
 
@@ -275,6 +385,17 @@ Per-agent model overrides are supported by passing `model` in `AIGenerateRequest
 working directory (see `app/config/settings.py` — `_PROJECT_ROOT_ENV_FILE`),
 so `uvicorn` behaves the same whether launched from `backend/` or the
 project root.
+
+### Source-of-truth file resolution (Phase 2A)
+`policy_terms.json`, `test_cases.json`, and `sample_documents_guide.md`
+actually live at the **repository root** — one level above
+`multi_agent_claims_pipeline/` — not inside the project directory as the
+originally documented tree in `README.md`/`docs/AI_HANDOFF.md` assumed.
+`app/config/paths.py`'s `resolve_source_file()` checks the CWD, the
+project root, and the repo root, in that order, so `PolicyRepository` and
+the evaluation runner find these files regardless of where a process is
+launched from — the same problem `.env` resolution solved in Phase 1,
+generalised into one shared helper.
 
 ---
 

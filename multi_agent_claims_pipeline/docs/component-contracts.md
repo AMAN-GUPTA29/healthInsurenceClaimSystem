@@ -313,14 +313,153 @@ one trace per claim.
 
 ---
 
-## Planned Phase 2 Contracts (stubs)
+## PolicyRepository
+
+**File**: `app/policy/policy_repository.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | Read-only data access to `policy_terms.json` — member roster, document requirements, minimum claim amount, submission deadline. **Not** a decision engine: it never evaluates coverage, waiting periods, exclusions, or co-pay. |
+| Input | `policy_file_path` (constructor) — resolved via `app.config.paths.resolve_source_file`, which checks CWD, the project root, and the repo root in that order (see Decision 14 in `docs/AI_HANDOFF.md`) |
+| Output | Typed accessors: `get_member(id) -> Optional[Member]`, `get_document_requirements(category) -> DocumentRequirement`, `has_category(category) -> bool`, `policy_id`, `minimum_claim_amount`, `submission_deadline_days` |
+| Errors | `PolicyLoadError` if the file is missing or not valid JSON (raised at construction, not lazily) |
+| Side effects | None — read-only |
+| Failure behavior | Fails fast at startup (via the `get_policy_repository` FastAPI dependency), rather than partway through a claim |
+
+### Known source-data quirks (worth knowing, not something to "fix" in the protected file)
+- `opd_categories` keys are lowercase (`"consultation"`); `document_requirements` keys are uppercase (`"CONSULTATION"`). `has_category` matches case-insensitively.
+- Several employees' `dependents` arrays reference member IDs (e.g. `DEP003`–`DEP006`) that have no corresponding entry in the `members` array. `get_member` correctly returns `None` for those.
+- Dependents' own `join_date` is absent in the source JSON; `PolicyRepository` infers it from the primary member's `join_date` at load time (a two-pass load — primaries first, then dependents).
+
+---
+
+## ClaimValidationAgent
+
+**File**: `app/agents/claim_validation_agent.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | The first pipeline stage — member existence, policy ID match, category structural validity, minimum claim amount. Nothing about coverage, waiting periods, or exclusions. |
+| Input | `ClaimSubmission` (async `run(submission)`) |
+| Output | `ValidationResult { valid: bool, errors: List[ValidationIssue], warnings: List[ValidationIssue] }` |
+| Dependencies | `PolicyRepository` only — **no AI provider** (constructed with `ai_provider=None`; see `BaseAgent`'s Phase 2A update below) |
+| Errors | **Never raises for an expected validation failure** — returns `valid=False` with structured `errors` instead. Only a genuine infrastructure problem (e.g. `PolicyRepository` itself failing) would propagate. |
+| Failure behavior | N/A — purely deterministic, no external calls to fail |
+
+### Deliberately not implemented (Phase 2A scope)
+Submission-deadline checking (`LATE_SUBMISSION`) is not implemented — see Decision 15 in `docs/AI_HANDOFF.md` for why (the assignment's fixture dates would always appear "late" against the real system clock).
+
+---
+
+## DocumentVerificationAgent
+
+**File**: `app/agents/document_verification_agent.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | Determine what document types were submitted, what's required (from `PolicyRepository`), what's missing/wrong/unreadable, and whether processing can continue. |
+| Input | `run(*, claim_category, documents: List[DocumentMetadata], classifications: Optional[Dict[str, DocumentClassification]])` |
+| Output | `DocumentVerificationResult { status, required_documents, received_documents, missing_documents, wrong_documents, quality_issues, classifications, user_message, confidence }` |
+| Dependencies | `AIProvider` (via `BaseAgent`) + `PolicyRepository` |
+| AI interaction | For each document **without** a pre-supplied `DocumentClassification`, calls `AIProvider.generate_structured()` with the prompt/schema in `app/ai/prompts/document_verification.py`. Documents that already have one (evaluation fixtures, or a real document classified earlier) skip the AI call entirely. |
+| Errors | `ExtractionError` if the AI response can't be parsed into a valid `DocumentClassification` (invalid enum value, missing field) |
+| Failure behavior | Raises on a genuine AI/parse failure — the caller (`ClaimsPipeline`) is responsible for catching this and degrading gracefully; the agent itself does not swallow errors or silently assume a document is valid |
+
+### Status decision (`DocumentVerificationStatus`)
+Priority order, highest first: any `UNREADABLE`/`PARTIAL` quality document → `NEEDS_RESUBMISSION`; else any required type with zero matching documents → `BLOCKED`; else `PASS` (an extraneous/`wrong_documents` entry alone, with all required types present, does not block).
+
+### `user_message` generation
+Built entirely from the structured result (`missing`, `wrong`, `quality_issues`, `received_documents` with counts) — never a hardcoded per-test-case string. Same code path produces TC001's and TC002's messages.
+
+### Real vs. provisional AI classification (Phase 2A limitation)
+No file-upload/OCR pipeline exists yet, so the AI path classifies from **filename + declared type only** — a genuine real AI call (see `docs/AI_HANDOFF.md`, live-verification results), but not real document/image understanding. `app/ai/prompts/document_verification.py`'s `hint_text` parameter is where OCR text or an inline image part will be added once file upload lands — the schema and parsing already accommodate it without changes.
+
+---
+
+## CrossDocumentValidationAgent
+
+**File**: `app/agents/cross_document_validation_agent.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | Cross-document consistency — Phase 2A implements patient-identity matching only (what TC003 needs), deliberately not a general validation engine. |
+| Input | `run(classifications: List[DocumentClassification])` |
+| Output | `CrossDocumentValidationResult { status: PASS \| BLOCKED, patient_names: Dict[str, str], user_message, confidence }` |
+| Dependencies | None — no `AIProvider`, no `PolicyRepository`. Pure comparison over already-extracted names. |
+| Matching | Case/whitespace-insensitive exact match (`_normalize_name`) — **not** fuzzy/typo-tolerant matching. Documented limitation, not a bug: "Rajesh Kumar" vs. "Rajesh  Kumar" matches; "Rajesh Kumar" vs. "Raj Kumar" does not. |
+| Errors | None — always returns a result; fewer than two named documents is `PASS` (nothing to compare) |
+| Failure behavior | N/A — no external calls |
+
+---
+
+## DocumentInputAdapter
+
+**File**: `app/services/document_input_adapter.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | The single input boundary: converts `ClaimSubmissionRequest` (the API request shape) into `(ClaimSubmission, Dict[str, DocumentClassification])` — the shape every downstream component consumes, whether the caller is a real API client or the evaluation runner. |
+| Input | `ClaimSubmissionRequest` — real submissions set only `file_id`/`file_name`/`declared_type`; the evaluation fixtures additionally set `actual_type`/`quality`/`patient_name_on_doc` (ground truth standing in for an AI classification) |
+| Output | `ClaimSubmission` (domain) + a classifications map containing an entry **only** for documents that had `actual_type` supplied |
+| Supported sources | HTTP API request body; `app/evaluation/runner.py`'s `request_from_test_case()` (test_cases.json → this same shape) |
+| Errors | None — Pydantic validation on `ClaimSubmissionRequest` itself handles malformed input before this adapter runs |
+| Guarantee | Contains **no business rules** (no validity/coverage logic) and **no per-test-case knowledge** — it does not know "TC001" exists. This is what keeps the fixture/real-submission distinction outside every business agent, per the assignment's explicit requirement. |
+
+---
+
+## ClaimsPipeline
+
+**File**: `app/pipeline/pipeline.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | Orchestrates `ClaimValidationAgent` → `DocumentVerificationAgent` → `CrossDocumentValidationAgent`, stopping early on the first blocking outcome. Phase 2A only — no policy evaluation or decision generation. |
+| Input | `run(claim: Claim, *, classifications, tracer: TraceService)` |
+| Output | The same `Claim`, mutated in place: `status`, `stopped_at`, `user_message`, and whichever `*_result` fields the reached stages populated |
+| Execution order | Claim Validation → Document Verification → Cross-Document Validation, each gated on the previous stage's result |
+| Stopping conditions | `ValidationResult.valid == False` → stop after stage 1; `DocumentVerificationResult.status != PASS` → stop after stage 2; `CrossDocumentValidationResult.status != PASS` → stop after stage 3 |
+| Trace behavior | One `TraceContext`/`TraceService` per claim, injected by the caller (never constructed internally). Each stage emits `STARTED` → `COMPLETED` (with metadata/confidence) or `FAILED`; unreached stages get `SKIPPED`; exactly one `PIPELINE`-component event summarises the run (`COMPLETED`/`WARNING`/`FAILED`) — see `docs/architecture.md` for the full rationale. |
+| **Guarantee** | **Never raises.** A genuine stage failure (AI timeout, parse error) is caught per-stage, recorded as `FAILED` in the trace, and reflected back as a degraded `Claim` (`status=BLOCKED`, an explanatory `user_message`) rather than propagating — see `_degrade()`. This mirrors the assignment's graceful-failure requirement (verified live — see `docs/AI_HANDOFF.md`). |
+| Failure behavior | Downstream stages after a failure get `SKIPPED`; the failing stage's result field stays `None` (never fabricated as if it had passed) |
+
+---
+
+## Claim API
+
+**Files**: `app/api/v1/claims.py`, `app/api/v1/schemas.py`
+
+| Endpoint | Contract |
+|----------|----------|
+| `POST /api/v1/claims` | Body: `ClaimSubmissionRequest`. Runs the full Phase 2A pipeline synchronously and returns `ClaimResponse` (201). Never 500s on an AI/pipeline failure — see `ClaimsPipeline`'s guarantee above; a technical failure still comes back as a normal `ClaimResponse` with `status=BLOCKED`. |
+| `GET /api/v1/claims/{claim_id}` | Returns `ClaimResponse`, or `404` if the claim_id is unknown. Never exposes raw SQLAlchemy rows — `ClaimRepository._to_domain` and `ClaimResponse.from_claim` are the only conversion points. |
+
+`ClaimResponse` never includes decision fields (`APPROVED`/`PARTIAL`/`REJECTED`/`MANUAL_REVIEW`) — those don't exist until a later phase.
+
+---
+
+## ClaimRepository
+
+**File**: `app/repositories/claim_repository.py`
+
+Unlike `TraceRepository` (deliberately not `BaseRepository` — see its own contract above), `ClaimRepository` genuinely is single-entity CRUD-by-id and implements `BaseRepository[Claim, str]` properly: `save(claim)` (upsert) and `get_by_id(id)`. Documents are a normalized child table (`claim_documents`); validation/verification results are stored as JSON columns on the `claims` row (same pattern as `TraceEventORM.metadata_json` — read as a whole with the claim, never queried field-by-field).
+
+---
+
+## Planned Phase 2B/3 Contracts (stubs)
 
 These components will receive full contracts when implemented:
-
-### ClaimsPipeline
-- **Input**: `ClaimSubmission` + `AIProvider` + `TraceService`
-- **Output**: `ClaimDecision`
-- **Guarantee**: Never raises; always returns a decision (may be `MANUAL_REVIEW` on failures); every stage reports through the injected `TraceService`
 
 ### PolicyEngine
 - **Input**: `Claim` + loaded `policy_terms.json`
@@ -336,3 +475,8 @@ These components will receive full contracts when implemented:
 - **Input**: `Document` + `AIProvider`
 - **Output**: `ExtractedDocumentData` with confidence score
 - **Guarantee**: Never raises on partial extraction; flags unextracted fields
+
+### DecisionGenerationAgent
+- **Input**: `Claim` + `PolicyEvaluationResult` + `FinancialBreakdown`
+- **Output**: `ClaimDecision` (APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW)
+- **Guarantee**: Never raises; always returns a decision (may be `MANUAL_REVIEW` on upstream failures)
