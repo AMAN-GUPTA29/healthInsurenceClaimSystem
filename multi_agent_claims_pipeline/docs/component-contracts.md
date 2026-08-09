@@ -445,12 +445,13 @@ The primary path is real multimodal document understanding: `analyze_document()`
 
 | Property | Value |
 |----------|-------|
-| Purpose | Orchestrates `ClaimValidationAgent` → `DocumentVerificationAgent` → `CrossDocumentValidationAgent`, stopping early on the first blocking outcome. Phase 2A only — no policy evaluation or decision generation. |
+| Purpose | Orchestrates `ClaimValidationAgent` → `DocumentVerificationAgent` → `CrossDocumentValidationAgent` → `DocumentExtractionAgent` (Phase 2B), stopping early on the first blocking outcome. Still no policy evaluation or decision generation. |
 | Input | `run(claim: Claim, *, classifications, tracer: TraceService)` |
-| Output | The same `Claim`, mutated in place: `status`, `stopped_at`, `user_message`, and whichever `*_result` fields the reached stages populated |
-| Execution order | Claim Validation → Document Verification → Cross-Document Validation, each gated on the previous stage's result |
-| Stopping conditions | `ValidationResult.valid == False` → stop after stage 1; `DocumentVerificationResult.status != PASS` → stop after stage 2; `CrossDocumentValidationResult.status != PASS` → stop after stage 3 |
-| Trace behavior | One `TraceContext`/`TraceService` per claim, injected by the caller (never constructed internally). Each stage emits `STARTED` → `COMPLETED` (with metadata/confidence, and — for `DOCUMENT_VERIFICATION` only — `ai_metadata` from any real AI call made) or `FAILED`; unreached stages get `SKIPPED`; exactly one `PIPELINE`-component event summarises the run (`COMPLETED`/`WARNING`/`FAILED`) — see `docs/architecture.md` for the full rationale. |
+| Output | The same `Claim`, mutated in place: `status`, `stopped_at`, `user_message`, and whichever `*_result` fields the reached stages populated (including `extraction_result`, Phase 2B) |
+| Execution order | Claim Validation → Document Verification → Cross-Document Validation → **Document Extraction**, each gated on the previous stage's result. Extraction runs last — after both early-stop checks already passed — because it's the most expensive stage (real per-document multimodal AI calls) and the least worth paying for on a claim that was going to stop anyway; see `docs/architecture.md` "Document Extraction". |
+| Stopping conditions | `ValidationResult.valid == False` → stop after stage 1; `DocumentVerificationResult.status != PASS` → stop after stage 2; `CrossDocumentValidationResult.status != PASS` → stop after stage 3. Stage 4 (extraction) has no stopping condition of its own — a per-document extraction failure degrades `extraction_result.has_failures`/`confidence`/`user_message`, never blocks the claim (see `DocumentExtractionAgent`'s own never-raise guarantee above). |
+| `document_extraction_agent` | **Optional**, defaults to `None`. When `None` (the evaluation runner; older tests predating Phase 2B), `DOCUMENT_EXTRACTION` is recorded `SKIPPED` — "no extraction agent configured" — not attempted, not a failure. Fully backward-compatible: no existing caller had to change. |
+| Trace behavior | One `TraceContext`/`TraceService` per claim, injected by the caller (never constructed internally). Each stage emits `STARTED` → `COMPLETED` (with metadata/confidence, and — for `DOCUMENT_VERIFICATION`/`DOCUMENT_EXTRACTION` — `ai_metadata` from a real AI call made) or `FAILED`; unreached/unconfigured stages get `SKIPPED`; exactly one `PIPELINE`-component event summarises the run (`COMPLETED`/`WARNING`/`FAILED`) — see `docs/architecture.md` for the full rationale. |
 | **Guarantee** | **Never raises.** A genuine stage failure (AI timeout, parse error) is caught per-stage, recorded as `FAILED` in the trace, and reflected back as a degraded `Claim` (`status=BLOCKED`, an explanatory `user_message`) rather than propagating — see `_degrade()`. This mirrors the assignment's graceful-failure requirement (verified live — see `docs/AI_HANDOFF.md`). |
 | Failure behavior | Downstream stages after a failure get `SKIPPED`; the failing stage's result field stays `None` (never fabricated as if it had passed) |
 
@@ -462,12 +463,14 @@ The primary path is real multimodal document understanding: `analyze_document()`
 
 | Endpoint | Contract |
 |----------|----------|
-| `POST /api/v1/claims` | **`multipart/form-data`** (not JSON): `member_id`/`policy_id`/`claim_category`/`treatment_date`/`claimed_amount`/`hospital_name`/`ytd_claims_amount` as `Form(...)` fields, plus one or more real files under the `documents` field as `File(...)`. Each file is validated (`validate_upload()`), stored (`DocumentStorage.save()`), then handed to `DocumentInputAdapter.from_uploads()`. Runs the full Phase 2A pipeline synchronously (including real multimodal classification) and returns `ClaimResponse` (201). A validation failure (bad file type, empty file, oversized file) returns a 4xx with a `DocumentError` message before any AI call is made. Never 500s on an AI/pipeline failure — see `ClaimsPipeline`'s guarantee above; a technical failure still comes back as a normal `ClaimResponse` with `status=BLOCKED`. |
+| `POST /api/v1/claims` | **`multipart/form-data`** (not JSON): `member_id`/`policy_id`/`claim_category`/`treatment_date`/`claimed_amount`/`hospital_name`/`ytd_claims_amount` as `Form(...)` fields, plus one or more real files under the `documents` field as `File(...)`. Each file is validated (`validate_upload()`), stored (`DocumentStorage.save()`), then handed to `DocumentInputAdapter.from_uploads()`. Runs the full pipeline synchronously (classification, cross-document validation, and — Phase 2B — per-document extraction) and returns `ClaimResponse` (201). A validation failure (bad file type, empty file, oversized file) returns a 4xx with a `DocumentError` message before any AI call is made. Never 500s on an AI/pipeline failure — see `ClaimsPipeline`'s guarantee above; a technical failure still comes back as a normal `ClaimResponse` with `status=BLOCKED`, or (Phase 2B, per-document only) `status=PROCESSING` with `extraction_result.has_failures=True`. |
 | `GET /api/v1/claims/{claim_id}` | Returns `ClaimResponse`, or `404` if the claim_id is unknown. Never exposes raw SQLAlchemy rows or `storage_reference` — `ClaimRepository._to_domain` and `ClaimResponse.from_claim` are the only conversion points, and `ClaimDocumentSummary` deliberately excludes `storage_reference`. |
 
 `ClaimResponse` never includes decision fields (`APPROVED`/`PARTIAL`/`REJECTED`/`MANUAL_REVIEW`) — those don't exist until a later phase.
 
 There is no document-type field anywhere in the request — the member cannot declare what a document is; `DocumentVerificationAgent` determines it from the file's actual content.
+
+**Phase 2B additions**: `ClaimResponse.extraction_result: Optional[ClaimExtractionResult]` (the claim-level aggregate) and `ClaimDocumentSummary.extraction: Optional[DocumentExtractionResult]` (per-document, `None` if not extracted — check `extraction_result.skipped`/`.failures` for why). Both directly reuse the `app/domain/extraction.py` domain models — the same precedent `validation_result`/`document_verification_result`/`cross_document_validation_result` already set (Phase 2A domain results are the API contract, not a separately duplicated schema).
 
 ---
 
@@ -477,28 +480,54 @@ There is no document-type field anywhere in the request — the member cannot de
 
 Unlike `TraceRepository` (deliberately not `BaseRepository` — see its own contract above), `ClaimRepository` genuinely is single-entity CRUD-by-id and implements `BaseRepository[Claim, str]` properly: `save(claim)` (upsert) and `get_by_id(id)`. Documents are a normalized child table (`claim_documents`); validation/verification results are stored as JSON columns on the `claims` row (same pattern as `TraceEventORM.metadata_json` — read as a whole with the claim, never queried field-by-field).
 
+### Extraction persistence (Phase 2B) — hybrid, not an opaque blob
+
+| Layer | What's stored | Why |
+|-------|---------------|-----|
+| `ClaimORM.extraction_summary_json` | Claim-level rollup: `failures`, `skipped` (file_ids), `ai_calls`, `confidence`, `has_failures` | Small, read-as-a-whole-with-the-claim — same pattern as the other `*_result_json` columns. |
+| `ClaimDocumentORM.extraction_json` | The **full** typed `DocumentExtractionResult` envelope (`model_dump(mode="json")`) for that document | The single source of truth for rehydration — `DocumentExtractionResult.model_validate(row.extraction_json)` resolves the correct one of the six extraction types via the discriminated union, no manual type dispatch needed on read. |
+| `ClaimDocumentORM.diagnosis` / `.treatment` / `.document_date` / `.doctor_name` / `.total_amount` | Denormalised **projections** of `extraction_json`, computed at save-time via `_extraction_projection()` (uses `getattr` since the six schemas don't share field names for "the doctor" or "the headline amount") | Genuinely queryable columns for a future SQL query or `PolicyEngine` lookup, without needing to parse JSON — never a second source of truth, always derived from the same envelope also stored in `extraction_json`. |
+| `ClaimDocumentORM.extraction_status` | `NOT_ATTEMPTED` \| `EXTRACTED` \| `FAILED` \| `SKIPPED` | Per-document extraction outcome, mirroring `processing_status`'s pattern for classification. |
+
+No migration tooling exists yet (`Base.metadata.create_all()` only creates missing tables — see Known Issue 13); the seven new `ClaimDocumentORM` columns and `ClaimORM.extraction_summary_json` required deleting the gitignored local `data/claims.db` once, same as every previous phase's schema change.
+
 ---
 
-## Planned Phase 2B/3 Contracts (stubs)
+## Extraction Domain Models (Phase 2B)
 
-These components will receive full contracts when implemented:
+**File**: `app/domain/extraction.py`
 
-### PolicyEngine
-- **Input**: `Claim` + loaded `policy_terms.json`
-- **Output**: `PolicyEvaluationResult` (coverage, limits, waiting periods, exclusions)
-- **Guarantee**: Purely deterministic; no AI calls
+### Contract
 
-### FinancialCalculationService
-- **Input**: `Claim` + `PolicyEvaluationResult`
-- **Output**: `FinancialBreakdown`
-- **Guarantee**: Purely deterministic; no AI calls; exact Decimal arithmetic
+| Property | Value |
+|----------|-------|
+| Purpose | Typed, per-document-type structured extraction results — pure Pydantic, no database/FastAPI/AI SDK imports, same rules as `app/domain/models.py`. |
+| Schemas | `PrescriptionExtraction`, `HospitalBillExtraction`, `LabReportExtraction`, `PharmacyBillExtraction`, `DentalReportExtraction`, `DischargeSummaryExtraction` — one per supported document type, all extending a shared `ExtractionBase` (`confidence: float` [required, AI-supplied, never fabricated], `warnings: List[str]`, `evidence: List[EvidenceItem]`). |
+| Discriminated union | `ExtractionPayload = Annotated[Union[...6 schemas...], Field(discriminator="document_type")]` — each schema's `document_type` field is a fixed `Literal`, so `DocumentExtractionResult.model_validate(...)` (and its persistence round-trip) resolves the correct concrete type automatically from the stored JSON, no manual branching needed. |
+| Money | Every amount field is `Optional[Decimal]`, parsed from an AI-supplied *string* (never a JSON float) via a `field_validator(mode="before")` that strips currency symbols/commas — see "Sentinel values" below. Never `float`. |
+| Sentinel values | The AI-facing JSON schemas (`app/ai/prompts/*_extraction.py`) never use `null` — Gemini's `response_schema` doesn't reliably support nullable unions (Decision 8). "Not visible" is `""` for strings/dates/amounts, `[]` for lists, `"UNCLEAR"` for the tri-state signature/stamp/abnormal-flag fields. `app/domain/extraction.py`'s validators (`_empty_to_none`, `_to_decimal`, `_to_tristate_bool`) convert these into real `None`/`Decimal`/`bool` — the AI-facing shape and the domain shape are deliberately different. |
+| Envelope | `DocumentExtractionResult { file_id, document_type, quality, patient: PatientInfo, document_date, source: "ai", extraction: ExtractionPayload }` — one per successfully extracted document. `.confidence`/`.warnings` are properties delegating to `.extraction` (not duplicated fields), so they persist as part of the same JSON blob. |
+| Aggregate | `ClaimExtractionResult { extractions, failures: List[DocumentExtractionFailure], skipped: List[file_id], confidence, has_failures, ai_calls }` — one per claim, mirrors `DocumentVerificationResult`'s shape. |
+| Errors | None raised by the domain models themselves — a schema violation raises Pydantic's `ValidationError`, which `DocumentExtractionAgent` catches and turns into a `DocumentExtractionFailure` (see below), never propagated raw. |
 
-### DocumentExtractionAgent
-- **Input**: `Document` + `AIProvider`
-- **Output**: `ExtractedDocumentData` with confidence score
-- **Guarantee**: Never raises on partial extraction; flags unextracted fields
+---
 
-### DecisionGenerationAgent
-- **Input**: `Claim` + `PolicyEvaluationResult` + `FinancialBreakdown`
-- **Output**: `ClaimDecision` (APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW)
-- **Guarantee**: Never raises; always returns a decision (may be `MANUAL_REVIEW` on upstream failures)
+## DocumentExtractionAgent (Phase 2B)
+
+**File**: `app/agents/document_extraction_agent.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | Answers "what does this document actually say?" — structured extraction beyond the classification `DocumentVerificationAgent` already does (type/quality/patient-name/confidence). Deliberately a separate agent, not a bigger `DocumentVerificationAgent` — see docs/architecture.md "Document Extraction" for the full separation-of-responsibilities rationale. |
+| Input | `run(*, documents: List[DocumentMetadata])` — every document on the claim, already classified by `DocumentVerificationAgent` (`detected_type`/`quality`/`storage_reference` populated). |
+| Output | `ClaimExtractionResult` (see above) |
+| Dependencies | `AIProvider` (via `BaseAgent`) + `DocumentStorage` (to read real bytes) |
+| AI interaction | **Always real** — `AIProvider.analyze_document()`, the same multimodal capability `DocumentVerificationAgent._classify_from_content()` uses. There is deliberately **no fixture/text-only extraction path** the way document verification has one for evaluation fixtures (Decision 17) — a document with no stored bytes cannot be extracted at all and is recorded as a per-document failure, not silently skipped as if it succeeded. Fixtures/mocks are only used at the `AIProvider` boundary in automated unit/integration tests, never as a second production code path. |
+| Schema/prompt selection | One request builder + one Pydantic class per document type (`app/ai/prompts/{prescription,hospital_bill,lab_report,pharmacy_bill,dental,discharge_summary}_extraction.py`), dispatched by a `Dict[DocumentType, ...]` lookup keyed off the document's already-classified type — never a single generic schema. `DIAGNOSTIC_REPORT`/`PRE_AUTH_LETTER`/`UNKNOWN` have no schema and are recorded in `skipped`, not attempted. |
+| Failure isolation | **Per-document, not per-claim.** Each document's extraction runs inside its own `try/except Exception` — an AI timeout, rate limit, malformed response, or missing `storage_reference` for one document becomes a `DocumentExtractionFailure` and the loop continues to the next document. `run()` itself **never raises** for a per-document problem, mirroring `ClaimsPipeline.run()`'s own never-raise guarantee (Decision 18) but scoped to one stage. Verified live against a real (organic) Gemini rate-limit error mid-claim — see `docs/AI_HANDOFF.md` "Real AI Verification". |
+| Confidence | `ClaimExtractionResult.confidence` = min AI-reported confidence across successful extractions only (`None` if zero succeeded) — same "never fabricate, minimum wins" rule as `DocumentVerificationResult.confidence`. |
+| Trace behavior | One `DOCUMENT_EXTRACTION` `STARTED`→`COMPLETED` pair per claim (via `ClaimsPipeline._run_stage`), **always `COMPLETED`, never `FAILED`, even with per-document failures** — the agent did its job (attempted every extractable document, recorded what it could and couldn't do); `FAILED` is reserved for a genuine failure of the agent itself, which the per-document isolation makes essentially unreachable in practice. Metadata: `{"documents_extracted", "failures", "skipped", "has_failures"}`; `ai_metadata` carries the first successful call's provider/model/latency. |
+
+---

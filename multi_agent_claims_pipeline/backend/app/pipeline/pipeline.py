@@ -7,14 +7,23 @@ history for what's still planned.
 Planned pipeline stages (full, across all phases):
     1.  ClaimValidationAgent         — ✅ Phase 2A
     2.  DocumentVerificationAgent    — ✅ Phase 2A
-    3.  DocumentExtractionAgent      — (planned) full OCR/extraction beyond classification
-    4.  CrossDocumentValidationAgent — ✅ Phase 2A (patient-identity only)
+    3.  CrossDocumentValidationAgent — ✅ Phase 2A (patient-identity only)
+    4.  DocumentExtractionAgent      — ✅ Phase 2B (structured data per document type)
     5.  PolicyEvaluationEngine       — (planned) deterministic policy rules
     6.  FraudAnalysisAgent           — (planned)
     7.  FinancialCalculationService  — (planned) copay, network discount, limits
     8.  DecisionGenerationAgent      — (planned)
     9.  ExplanationAgent             — (planned)
     10. TraceRecorder                — ✅ Phase 1 (TraceService, injected below)
+
+Phase 2B note — why extraction runs after cross-document validation, not
+before or in parallel: extraction is the most expensive stage (real
+multimodal AI calls per document, ~20-40s each) and the least reversible
+signal to explain to a member ("here's what we read from your documents").
+Running it only after both early-stop checks already passed means a claim
+that would have stopped anyway (wrong document, unreadable document,
+patient mismatch) never pays that cost — see docs/architecture.md
+"Document Extraction" for the full rationale.
 
 Design — how early stopping is represented in the trace:
 Each stage's own STARTED/COMPLETED/FAILED pair reflects whether the agent
@@ -36,6 +45,7 @@ from typing import Any, Callable, Coroutine, Dict, Optional, TypeVar
 
 from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
+from app.agents.document_extraction_agent import DocumentExtractionAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
 from app.domain.models import Claim, ClaimStatus, DocumentProcessingStatus
 from app.domain.trace import TraceComponent
@@ -49,6 +59,27 @@ from app.tracing.service import TraceService
 T = TypeVar("T")
 
 
+def _final_user_message(claim: Claim) -> str:
+    """
+    The member-facing message once every configured stage has run without a
+    hard stop. Built from the structured extraction_result the same way
+    DocumentVerificationAgent builds its own message from structured
+    results (see docs/AI_HANDOFF.md invariant #17) — never a hardcoded
+    per-case string.
+    """
+    result = claim.extraction_result
+    if result is None:
+        return "All early checks passed. Policy evaluation is not yet implemented."
+    if result.has_failures:
+        return (
+            "All early checks passed. We extracted the information we could from your "
+            f"documents, but {len(result.failures)} document(s) could not be fully processed "
+            "— a team member may need to review this claim manually. Policy evaluation is "
+            "not yet implemented."
+        )
+    return "All early checks passed and document information was extracted. Policy evaluation is not yet implemented."
+
+
 class ClaimsPipeline:
     """Orchestrates the Phase 2A pipeline stages for a single claim."""
 
@@ -58,10 +89,16 @@ class ClaimsPipeline:
         claim_validation_agent: ClaimValidationAgent,
         document_verification_agent: DocumentVerificationAgent,
         cross_document_validation_agent: CrossDocumentValidationAgent,
+        document_extraction_agent: Optional[DocumentExtractionAgent] = None,
     ) -> None:
         self._claim_validation_agent = claim_validation_agent
         self._document_verification_agent = document_verification_agent
         self._cross_document_validation_agent = cross_document_validation_agent
+        # Optional, defaulting to None, so every existing caller that builds
+        # a ClaimsPipeline without an extraction agent (evaluation runner,
+        # existing tests) keeps working unmodified — DOCUMENT_EXTRACTION is
+        # simply recorded SKIPPED rather than attempted. See `run()`.
+        self._document_extraction_agent = document_extraction_agent
 
     async def run(
         self,
@@ -188,11 +225,16 @@ class ClaimsPipeline:
             )
         except Exception as exc:
             return await self._degrade(
-                claim, tracer, TraceComponent.CROSS_DOCUMENT_VALIDATION, exc, t0, remaining=[],
+                claim, tracer, TraceComponent.CROSS_DOCUMENT_VALIDATION, exc, t0,
+                remaining=[TraceComponent.DOCUMENT_EXTRACTION],
             )
         claim.cross_document_validation_result = cross_result
 
         if cross_result.status != CrossDocumentValidationStatus.PASS:
+            await tracer.skipped(
+                TraceComponent.DOCUMENT_EXTRACTION,
+                "Skipped — cross-document validation failed",
+            )
             await tracer.warning(
                 TraceComponent.PIPELINE,
                 "Stopped: cross-document validation failed",
@@ -204,15 +246,45 @@ class ClaimsPipeline:
             claim.processing_time_ms = (time.monotonic() - t0) * 1000
             return claim
 
-        # ── End of Phase 2A ───────────────────────────────────────────────────
+        # ── Stage 4: Document Extraction (Phase 2B) ─────────────────────────
+        if self._document_extraction_agent is None:
+            # No extraction agent configured (e.g. the evaluation runner,
+            # which never has real document bytes for a fixture-driven
+            # case) — not an error, just nothing to do this run.
+            await tracer.skipped(
+                TraceComponent.DOCUMENT_EXTRACTION,
+                "Skipped — no extraction agent configured for this pipeline",
+            )
+        else:
+            try:
+                extraction_result = await self._run_stage(
+                    tracer,
+                    TraceComponent.DOCUMENT_EXTRACTION,
+                    lambda: self._document_extraction_agent.run(documents=claim.submission.documents),
+                    metadata_fn=lambda r: {
+                        "documents_extracted": len(r.extractions),
+                        "failures": len(r.failures),
+                        "skipped": len(r.skipped),
+                        "has_failures": r.has_failures,
+                    },
+                    confidence_fn=lambda r: r.confidence,
+                    ai_metadata_fn=lambda r: r.ai_calls[0] if r.ai_calls else None,
+                )
+            except Exception as exc:
+                return await self._degrade(
+                    claim, tracer, TraceComponent.DOCUMENT_EXTRACTION, exc, t0, remaining=[],
+                )
+            claim.extraction_result = extraction_result
+
+        # ── End of Phase 2B ───────────────────────────────────────────────────
         await tracer.completed(
             TraceComponent.PIPELINE,
-            message="Reached end of Phase 2A pipeline — policy evaluation and decision are not yet implemented",
+            message="Reached end of Phase 2B pipeline — policy evaluation and decision are not yet implemented",
             duration_ms=(time.monotonic() - t0) * 1000,
         )
         claim.status = ClaimStatus.PROCESSING
         claim.stopped_at = None
-        claim.user_message = "All early checks passed. Policy evaluation is not yet implemented."
+        claim.user_message = _final_user_message(claim)
         claim.processing_time_ms = (time.monotonic() - t0) * 1000
         return claim
 

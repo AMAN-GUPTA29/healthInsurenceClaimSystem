@@ -279,6 +279,135 @@ claim, HTTP response — degraded exactly as designed.
 
 ---
 
+## Document Extraction (Phase 2B)
+
+Phase 2B adds a fourth pipeline stage, `DocumentExtractionAgent`, running
+after cross-document validation:
+
+```
+Claim Validation → Document Verification → Cross-Document Validation
+                                                       │
+                                                       ▼ (only if PASS)
+                                          DocumentExtractionAgent
+                                          (one AIProvider.analyze_document()
+                                           call per extractable document)
+                                                       │
+                                                       ▼
+                                          status=PROCESSING, extraction_result set
+```
+
+### Why verification and extraction are separate agents
+`DocumentVerificationAgent` answers "is this the correct document and is it
+usable?" — a cheap-ish classification (type/quality/patient-name/
+confidence) whose job is to fail fast and specifically when the member
+uploaded the wrong thing (TC001) or something unreadable (TC002). Merging
+full structured extraction into that agent would mean every claim pays
+extraction's cost (slower, more tokens, six document-specific schemas)
+*before* knowing whether the claim will even survive verification — most
+of that work would be wasted on a claim that was always going to stop at
+"wrong document type." Keeping them separate means `DocumentExtractionAgent`
+only ever runs on documents that already passed the cheap check, and
+each agent's prompt/schema can evolve independently without touching the
+other's contract. `docs/component-contracts.md` documents both fully.
+
+### Why extraction is document-type-specific, not one generic schema
+A hospital bill's meaningful fields (line items, subtotal, discount, tax)
+share almost nothing with a lab report's (test name, result, unit,
+reference range, abnormal flag). A single generic "extract everything"
+schema would either be a superset with mostly-empty fields on every
+document (noisy, harder to validate, harder for the AI to fill correctly)
+or a lossy lowest-common-denominator. Six typed Pydantic schemas
+(`app/domain/extraction.py`) — one per supported `DocumentType` — each ask
+the AI for exactly the fields that document type can actually contain,
+matching `sample_documents_guide.md`'s own per-type field lists. A shared
+`ExtractionBase` (`confidence`/`warnings`/`evidence`) avoids duplicating
+the cross-cutting fields, and a discriminated union
+(`Field(discriminator="document_type")`) lets `DocumentExtractionResult`
+carry any of the six without a manual type-check at every read site.
+
+### How documents reach the AI, and why the schema avoids `null`
+Same real-content path `DocumentVerificationAgent` already established
+(Decision 22/24): `DocumentExtractionAgent` reads the actual bytes via
+`DocumentStorage.read(doc.storage_reference)` and sends them through
+`AIProvider.analyze_document()` — never re-derives anything from a
+filename. The AI-facing JSON schemas
+(`app/ai/prompts/*_extraction.py`) deliberately never use `null`: Gemini's
+`response_schema` is an OpenAPI-3.0-like subset that doesn't reliably
+support nullable unions (Decision 8), so "not visible" is represented with
+an explicit sentinel — `""` for strings/dates/amounts, `[]` for lists,
+`"UNCLEAR"` for the tri-state signature/stamp/abnormal-flag fields — and
+`app/domain/extraction.py`'s validators translate those sentinels into
+real `None`/`Decimal`/`bool` on the way into the domain model. This is the
+same pattern `document_verification.py`'s classification schema already
+uses (`patient_name: ""` instead of `null`), generalised across six more
+schemas rather than reinvented per schema.
+
+### How structured output is validated
+`AIProvider.analyze_document()` returns a raw dict
+(`DocumentAnalysisResponse.structured_data`). `DocumentExtractionAgent`
+never lets that dict flow further unvalidated — it's immediately passed
+to a per-document-type adapter function (`_adapt_prescription`,
+`_adapt_hospital_bill`, ...) that reshapes the AI's flat field names into
+the domain model's nested shape (e.g. `doctor_name`/`doctor_registration_number`
+→ a `DoctorInfo` sub-object) and constructs the typed Pydantic model. A
+`KeyError` (AI omitted a required field) or `ValidationError` (AI returned
+something the schema rejects — e.g. an unparseable enum) is caught and
+raised as `ExtractionError`, which the caller turns into a
+`DocumentExtractionFailure` rather than persisting a malformed/partial
+dict.
+
+### How failures are handled — per document, not per claim
+Real AI calls fail sometimes (this was verified *live*, not just in
+tests — see `docs/AI_HANDOFF.md` "Real AI Verification (Phase 2B)": a
+genuine Gemini rate-limit error occurred organically mid-verification).
+`DocumentExtractionAgent.run()` wraps each document's extraction in its
+own `try/except Exception`, so one failure never stops the others — the
+loop continues, the failure is recorded in `ClaimExtractionResult.failures`,
+and `has_failures=True` degrades the claim's `user_message` without
+blocking it (`status` stays `PROCESSING`). This mirrors
+`ClaimsPipeline.run()`'s own claim-level never-raise guarantee (Decision
+18) at one level down — a document-level version of the same idea, for
+the same reason: a system that can't tolerate one bad input is not
+production-quality for an insurer processing tens of thousands of real,
+messy documents.
+
+### How extraction is persisted
+Hybrid, not an opaque blob (see `docs/component-contracts.md`
+"ClaimRepository — Extraction persistence" for the full column list): the
+complete typed envelope is stored as JSON on `ClaimDocumentORM.extraction_json`
+(the source of truth, rehydrated via the same discriminated union that
+validated it going in), while a handful of fields genuinely likely to be
+queried later (`diagnosis`, `treatment`, `document_date`, `doctor_name`,
+`total_amount`) are denormalised onto real columns at save time. Claim-level
+rollup (failures/skipped/ai_calls/confidence) lives on
+`ClaimORM.extraction_summary_json`, matching the existing `*_result_json`
+pattern for validation/verification/cross-document results.
+
+### How the frontend displays extraction
+`ClaimDetail.tsx`'s `DocumentCard` gains a collapsed-by-default "Extracted
+Information" section per document — never raw JSON as the primary view.
+`ExtractedInfo` switches on `extraction.extraction.document_type` and
+renders a document-type-specific layout (doctor/diagnosis/medications for
+a prescription; line items/total for a bill; test results for a lab
+report; ...), plus any `warnings` the AI raised. A document that failed
+extraction shows the specific failure reason (from
+`extraction_result.failures`) instead of a toggle with nothing behind it.
+
+### How explainability is preserved
+Every extraction attempt is traced the same way every other stage is
+(`docs/architecture.md` §6's rules apply unchanged): one `DOCUMENT_EXTRACTION`
+`STARTED`→`COMPLETED` pair per claim, `ai_metadata` capturing
+provider/model/latency, and `metadata` summarising counts
+(`documents_extracted`/`failures`/`skipped`/`has_failures`) — never the
+full extracted payload or a raw AI response in the trace itself (that
+belongs in `extraction_json`, which already has its own storage lifecycle,
+per the same reasoning §6 gives for not duplicating documents into trace
+rows). An operations user can see from the trace alone whether extraction
+ran, how long it took, which provider/model answered, and how many
+documents succeeded vs. failed — without opening the full claim record.
+
+---
+
 ## Component Map
 
 ### Backend Layers
@@ -305,12 +434,13 @@ claim, HTTP response — degraded exactly as designed.
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
-│  Agent Layer (Phase 2A)                                         │
+│  Agent Layer (Phase 2A + 2B)                                     │
 │  app/agents/base_agent.py   ← BaseAgent(ai_provider=None|AI)  │
 │  app/agents/claim_validation_agent.py                          │
 │  app/agents/document_verification_agent.py                     │
 │  app/agents/cross_document_validation_agent.py                 │
-│  (extraction_agent, fraud_analysis_agent, ... ← planned)       │
+│  app/agents/document_extraction_agent.py  ← Phase 2B          │
+│  (fraud_analysis_agent, decision_generation_agent, ... ← planned)│
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
@@ -320,6 +450,13 @@ claim, HTTP response — degraded exactly as designed.
 │  app/ai/providers/anthropic_provider.py  ← Anthropic adapter  │
 │  app/ai/schemas/ai_schemas.py        ← Request/response types │
 │  app/ai/prompts/document_verification.py ← classification prompt│
+│  app/ai/prompts/extraction_common.py     ← shared extraction rules/schema helpers│
+│  app/ai/prompts/prescription_extraction.py    ← Phase 2B      │
+│  app/ai/prompts/hospital_bill_extraction.py   ← Phase 2B      │
+│  app/ai/prompts/lab_report_extraction.py      ← Phase 2B      │
+│  app/ai/prompts/pharmacy_bill_extraction.py   ← Phase 2B      │
+│  app/ai/prompts/dental_extraction.py          ← Phase 2B      │
+│  app/ai/prompts/discharge_summary_extraction.py ← Phase 2B    │
 └────────────────────┬───────────────────────────────────────────┘
                      │
 ┌────────────────────▼───────────────────────────────────────────┐
@@ -333,6 +470,7 @@ claim, HTTP response — degraded exactly as designed.
 │  Domain / Policy Layer                                          │
 │  app/domain/models.py        ← Claim, Member, Document        │
 │  app/domain/verification.py  ← Validation/Verification results│
+│  app/domain/extraction.py    ← Extraction schemas (Phase 2B)  │
 │  app/domain/errors.py        ← Error hierarchy                │
 │  app/policy/policy_repository.py ← PolicyRepository (Phase 2A)│
 └────────────────────┬───────────────────────────────────────────┘
@@ -357,9 +495,8 @@ claim, HTTP response — degraded exactly as designed.
 **Phase 0**: SQLite via aiosqlite (development default)
 **Phase 1**: Added `trace_events` table (see `app/repositories/trace_models.py`) — one row per `TraceEvent`, ordered by autoincrement `id`, indexed on `(claim_id, id)` and `(trace_id, id)` for the two access patterns `TraceRepository` supports.
 **Phase 2A**: Added `claims` (one row per claim; validation/verification results stored as JSON columns, same pattern as `trace_events.metadata_json`) and `claim_documents` (child rows keyed by `claim_id`) — see `app/repositories/claim_models.py`.
-**Phase 2B/3**: Add ORM models for:
-- `extractions` table
-- `decisions` table
+**Phase 2B**: No new table — extended the existing `claims`/`claim_documents` rows instead (hybrid persistence, see `docs/component-contracts.md` "ClaimRepository — Extraction persistence"): `claims.extraction_summary_json` (claim-level rollup) and seven new `claim_documents` columns (`extraction_status`, `diagnosis`, `treatment`, `document_date`, `doctor_name`, `total_amount`, `extraction_json`). A dedicated `extractions` table was considered and rejected — `claim_documents` is already one-row-per-document, so a second document-scoped table would just be a 1:1 join for no benefit.
+**Phase 3 (planned)**: Add an ORM model for `decisions`.
 
 **Migration path**: Changing `DATABASE_URL` to a PostgreSQL `asyncpg://` URL requires no code changes. The SQLAlchemy ORM is database-agnostic.
 
@@ -377,11 +514,16 @@ The `AIProvider` ABC exposes three core capabilities:
 |--------|----------|--------|
 | `generate_text()` | Explanations, member messages | `AIGenerateResponse` |
 | `generate_structured()` | Extraction, classification | `AIStructuredResponse` |
-| `analyze_document()` | Real multimodal classification of uploaded document bytes (type/quality/patient/confidence) | `DocumentAnalysisResponse` |
+| `analyze_document()` | Real multimodal classification (Phase 2A) and structured extraction (Phase 2B) of uploaded document bytes | `DocumentAnalysisResponse` |
 
 Structured output uses Anthropic's `tool_use` feature (or Gemini's
 `response_schema`/`response_mime_type=application/json`) to guarantee JSON
-schema conformance, depending on which provider is configured.
+schema conformance, depending on which provider is configured. Phase 2B's
+six extraction schemas (`app/ai/prompts/*_extraction.py`) are the second
+real proof of this abstraction, after Phase 2A's classification schema —
+`DocumentExtractionAgent` never imports `google.genai` or `anthropic`, and
+switching `AI_PROVIDER=gemini` → `AI_PROVIDER=anthropic` requires no
+change to the agent or any schema.
 
 ---
 
@@ -398,8 +540,17 @@ src/
 ├── components/TraceViewer.tsx    ← Reusable trace-event timeline component
 ├── pages/Dashboard.tsx           ← System health dashboard
 ├── pages/ClaimSubmission.tsx     ← Real file-upload claim submission form
-└── pages/ClaimDetail.tsx         ← Claim result + per-document AI results + TraceViewer
+└── pages/ClaimDetail.tsx         ← Claim result + per-document AI results + extraction + TraceViewer
 ```
+
+**Phase 2B**: `ClaimDetail.tsx`'s `DocumentCard` gained a collapsed-by-default
+"Extracted Information" toggle (only rendered when `doc.extraction` is
+present) and a new `ExtractedInfo` component that switches on
+`extraction.extraction.document_type` to render a document-type-specific,
+operations-friendly layout — never raw JSON as the primary view. `types/index.ts`
+gained the matching TypeScript mirror of `app/domain/extraction.py`
+(`ExtractionPayload` as a discriminated union on `document_type`, same
+shape as the backend's `Annotated[Union[...], Field(discriminator=...)]`).
 
 All backend calls go through `services/api.ts`. Components never call `fetch()` directly.
 `claimsApi.submit()` is the one method that talks multipart: it builds a

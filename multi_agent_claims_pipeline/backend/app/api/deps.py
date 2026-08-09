@@ -18,6 +18,7 @@ from fastapi import Depends
 
 from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
+from app.agents.document_extraction_agent import DocumentExtractionAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
 from app.ai.providers.base import AIProvider
 from app.ai.providers.factory import create_ai_provider
@@ -153,6 +154,10 @@ def get_claims_pipeline(
             document_storage=document_storage,
         ),
         cross_document_validation_agent=CrossDocumentValidationAgent(),
+        document_extraction_agent=DocumentExtractionAgent(
+            ai_provider=ai_provider,
+            document_storage=document_storage,
+        ),
     )
 
 

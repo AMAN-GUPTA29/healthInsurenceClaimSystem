@@ -18,6 +18,17 @@ export type DocumentType =
   | 'PRE_AUTH_LETTER'
   | 'UNKNOWN'
 
+// Document types DocumentExtractionAgent has a schema for (Phase 2B).
+// DIAGNOSTIC_REPORT / PRE_AUTH_LETTER / UNKNOWN are classified but not
+// extracted — see app/domain/extraction.py SUPPORTED_EXTRACTION_TYPES.
+export type ExtractableDocumentType =
+  | 'PRESCRIPTION'
+  | 'HOSPITAL_BILL'
+  | 'LAB_REPORT'
+  | 'PHARMACY_BILL'
+  | 'DENTAL_REPORT'
+  | 'DISCHARGE_SUMMARY'
+
 export type ClaimCategory =
   | 'CONSULTATION'
   | 'DIAGNOSTIC'
@@ -196,6 +207,184 @@ export interface CrossDocumentValidationResult {
   confidence?: number
 }
 
+// ── Document Extraction (Phase 2B) ───────────────────────────────────────────
+//
+// Mirrors app/domain/extraction.py. DocumentExtractionAgent runs after
+// cross-document validation and produces one typed, document-type-specific
+// payload per document — never a raw/unvalidated blob.
+
+export interface PatientInfo {
+  name?: string
+  age?: number
+  gender?: string
+  date_of_birth?: string
+  member_id?: string
+}
+
+export interface DoctorInfo {
+  name?: string
+  registration_number?: string
+  specialization?: string
+  hospital_or_clinic?: string
+}
+
+export interface EvidenceItem {
+  field: string
+  quote: string
+}
+
+export interface Medication {
+  name: string
+  strength?: string
+  dosage?: string
+  frequency?: string
+  duration?: string
+  route?: string
+  instructions?: string
+}
+
+export interface LineItem {
+  description: string
+  quantity?: number
+  unit_price?: number
+  amount?: number
+}
+
+export interface LabTestResult {
+  test_name: string
+  result?: string
+  unit?: string
+  reference_range?: string
+  abnormal_flag?: boolean
+}
+
+export interface PharmacyItem {
+  medicine_name: string
+  batch_number?: string
+  expiry_date?: string
+  quantity?: number
+  mrp?: number
+  discount?: number
+  amount?: number
+}
+
+interface ExtractionBaseFields {
+  confidence: number
+  warnings: string[]
+  evidence: EvidenceItem[]
+}
+
+export interface PrescriptionExtraction extends ExtractionBaseFields {
+  document_type: 'PRESCRIPTION'
+  patient: PatientInfo
+  prescription_date?: string
+  doctor: DoctorInfo
+  diagnosis?: string
+  treatment?: string
+  medications: Medication[]
+  investigations: string[]
+  signature_present?: boolean
+  stamp_present?: boolean
+}
+
+export interface HospitalBillExtraction extends ExtractionBaseFields {
+  document_type: 'HOSPITAL_BILL'
+  patient_name?: string
+  hospital_name?: string
+  bill_number?: string
+  bill_date?: string
+  admission_date?: string
+  discharge_date?: string
+  doctor: DoctorInfo
+  line_items: LineItem[]
+  subtotal?: number
+  discount?: number
+  tax?: number
+  total?: number
+  currency: string
+}
+
+export interface LabReportExtraction extends ExtractionBaseFields {
+  document_type: 'LAB_REPORT'
+  patient: PatientInfo
+  referring_doctor?: string
+  sample_date?: string
+  report_date?: string
+  tests: LabTestResult[]
+  laboratory_name?: string
+  pathologist_name?: string
+  registration_number?: string
+}
+
+export interface PharmacyBillExtraction extends ExtractionBaseFields {
+  document_type: 'PHARMACY_BILL'
+  patient_name?: string
+  pharmacy_name?: string
+  bill_number?: string
+  bill_date?: string
+  items: PharmacyItem[]
+  subtotal?: number
+  tax?: number
+  total?: number
+}
+
+export interface DentalReportExtraction extends ExtractionBaseFields {
+  document_type: 'DENTAL_REPORT'
+  patient_name?: string
+  dentist: DoctorInfo
+  date_on_document?: string
+  diagnosis?: string
+  procedure?: string
+  treatment?: string
+  amount?: number
+  notes?: string
+}
+
+export interface DischargeSummaryExtraction extends ExtractionBaseFields {
+  document_type: 'DISCHARGE_SUMMARY'
+  patient_name?: string
+  hospital_name?: string
+  admission_date?: string
+  discharge_date?: string
+  diagnosis?: string
+  procedure_or_treatment?: string
+  doctor: DoctorInfo
+  discharge_instructions?: string
+  total_amount?: number
+}
+
+export type ExtractionPayload =
+  | PrescriptionExtraction
+  | HospitalBillExtraction
+  | LabReportExtraction
+  | PharmacyBillExtraction
+  | DentalReportExtraction
+  | DischargeSummaryExtraction
+
+export interface DocumentExtractionResult {
+  file_id: string
+  document_type: DocumentType
+  quality: DocumentQuality
+  patient: PatientInfo
+  document_date?: string
+  source: 'ai'
+  extraction: ExtractionPayload
+}
+
+export interface DocumentExtractionFailure {
+  file_id: string
+  document_type?: DocumentType
+  reason: string
+}
+
+export interface ClaimExtractionResult {
+  extractions: DocumentExtractionResult[]
+  failures: DocumentExtractionFailure[]
+  skipped: string[]
+  confidence?: number
+  has_failures: boolean
+}
+
 // ── Claim submission (Phase 2A correction: real file upload) ────────────────
 //
 // POST /api/v1/claims is multipart/form-data — claim metadata as form
@@ -227,6 +416,7 @@ export interface ClaimDocumentSummary {
   patient_name?: string
   confidence?: number
   processing_status: DocumentProcessingStatus
+  extraction?: DocumentExtractionResult
 }
 
 export interface ClaimResponse {
@@ -245,6 +435,7 @@ export interface ClaimResponse {
   validation_result?: ValidationResult
   document_verification_result?: DocumentVerificationResult
   cross_document_validation_result?: CrossDocumentValidationResult
+  extraction_result?: ClaimExtractionResult
   created_at: string
   updated_at: string
 }

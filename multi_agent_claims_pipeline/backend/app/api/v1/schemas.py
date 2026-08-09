@@ -15,6 +15,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
+from app.domain.extraction import ClaimExtractionResult, DocumentExtractionResult
 from app.domain.models import (
     Claim,
     ClaimCategory,
@@ -46,6 +47,12 @@ class ClaimDocumentSummary(BaseModel):
     patient_name: Optional[str] = None
     confidence: Optional[float] = None
     processing_status: DocumentProcessingStatus = DocumentProcessingStatus.PENDING
+    # Phase 2B: the full typed extraction envelope for this document, if
+    # DocumentExtractionAgent extracted it. None means "not extracted" —
+    # either extraction hasn't run yet, this document type has no
+    # extraction schema, or it failed (see ClaimResponse.extraction_result
+    # .skipped / .failures for which one).
+    extraction: Optional[DocumentExtractionResult] = None
 
 
 class ClaimResponse(BaseModel):
@@ -64,11 +71,17 @@ class ClaimResponse(BaseModel):
     validation_result: Optional[ValidationResult] = None
     document_verification_result: Optional[DocumentVerificationResult] = None
     cross_document_validation_result: Optional[CrossDocumentValidationResult] = None
+    extraction_result: Optional[ClaimExtractionResult] = None
     created_at: datetime
     updated_at: datetime
 
     @classmethod
     def from_claim(cls, claim: Claim) -> "ClaimResponse":
+        extractions_by_file_id = (
+            {e.file_id: e for e in claim.extraction_result.extractions}
+            if claim.extraction_result
+            else {}
+        )
         return cls(
             claim_id=claim.claim_id,
             member_id=claim.submission.member_id,
@@ -92,12 +105,14 @@ class ClaimResponse(BaseModel):
                     patient_name=d.metadata.patient_name,
                     confidence=d.metadata.confidence,
                     processing_status=d.metadata.processing_status,
+                    extraction=extractions_by_file_id.get(d.metadata.file_id),
                 )
                 for d in claim.documents
             ],
             validation_result=claim.validation_result,
             document_verification_result=claim.document_verification_result,
             cross_document_validation_result=claim.cross_document_validation_result,
+            extraction_result=claim.extraction_result,
             created_at=claim.created_at,
             updated_at=claim.updated_at,
         )

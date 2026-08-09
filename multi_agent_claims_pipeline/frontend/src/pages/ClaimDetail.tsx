@@ -9,7 +9,7 @@ import { useParams, Link } from 'react-router-dom'
 import { claimsApi, APIClientError } from '../services/api'
 import { useClaimTrace } from '../hooks/useClaimTrace'
 import { TraceViewer } from '../components/TraceViewer'
-import type { ClaimResponse, ClaimStatus } from '../types'
+import type { ClaimResponse, ClaimStatus, DocumentExtractionResult } from '../types'
 
 const CARD: React.CSSProperties = {
   background: 'rgba(30, 41, 59, 0.6)',
@@ -65,7 +65,205 @@ const DOCUMENT_VERIFICATION_SKIP_REASON: Record<string, string> = {
   CLAIM_VALIDATION: 'Document verification was skipped because claim validation failed.',
 }
 
-function DocumentCard({ doc, stoppedAt }: { doc: ClaimResponse['documents'][number]; stoppedAt?: string }) {
+function fmtAmount(amount?: number): string {
+  if (amount == null) return '—'
+  return `₹${amount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+function Field({ label, value }: { label: string; value?: string | null }) {
+  if (!value) return null
+  return (
+    <div style={{ marginBottom: '6px' }}>
+      <span style={{ color: '#64748b' }}>{label}: </span>
+      <span style={{ color: '#e2e8f0' }}>{value}</span>
+    </div>
+  )
+}
+
+function ExtractionSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: '14px' }}>
+      <div style={{ fontSize: '11px', color: '#818cf8', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px', fontWeight: 700 }}>
+        {title}
+      </div>
+      <div style={{ fontSize: '13px' }}>{children}</div>
+    </div>
+  )
+}
+
+/** Document-type-specific rendering of one extraction payload — an
+ * operations-friendly view, never raw JSON as the primary UI. */
+function ExtractedInfo({ result }: { result: DocumentExtractionResult }) {
+  const e = result.extraction
+
+  return (
+    <div
+      data-testid="extracted-information"
+      style={{ borderTop: '1px solid rgba(51, 65, 85, 0.6)', marginTop: '12px', paddingTop: '12px' }}
+    >
+      {e.warnings.length > 0 && (
+        <div
+          style={{
+            background: 'rgba(245, 158, 11, 0.1)',
+            border: '1px solid rgba(245, 158, 11, 0.3)',
+            borderRadius: '6px',
+            padding: '8px 10px',
+            marginBottom: '12px',
+          }}
+        >
+          {e.warnings.map((w, i) => (
+            <div key={i} data-testid="extraction-warning" style={{ fontSize: '12px', color: '#fcd34d' }}>
+              ⚠ {w}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {e.document_type === 'PRESCRIPTION' && (
+        <>
+          <ExtractionSection title="Doctor">
+            <Field label="Name" value={e.doctor.name} />
+            <Field label="Registration" value={e.doctor.registration_number} />
+            <Field label="Clinic" value={e.doctor.hospital_or_clinic} />
+          </ExtractionSection>
+          <ExtractionSection title="Diagnosis">
+            <Field label="" value={e.diagnosis} />
+          </ExtractionSection>
+          <Field label="Date" value={e.prescription_date} />
+          {e.medications.length > 0 && (
+            <ExtractionSection title="Medications">
+              {e.medications.map((m, i) => (
+                <div key={i} style={{ marginBottom: '8px' }}>
+                  <div style={{ color: '#e2e8f0' }}>
+                    {m.name}
+                    {m.strength ? ` ${m.strength}` : ''}
+                  </div>
+                  <div style={{ color: '#94a3b8', fontSize: '12px' }}>
+                    {[m.dosage, m.frequency, m.duration].filter(Boolean).join(' · ') || '—'}
+                  </div>
+                </div>
+              ))}
+            </ExtractionSection>
+          )}
+          {e.investigations.length > 0 && (
+            <ExtractionSection title="Investigations">{e.investigations.join(', ')}</ExtractionSection>
+          )}
+        </>
+      )}
+
+      {e.document_type === 'HOSPITAL_BILL' && (
+        <>
+          <Field label="Hospital" value={e.hospital_name} />
+          <Field label="Bill Number" value={e.bill_number} />
+          <Field label="Date" value={e.bill_date} />
+          <Field label="Patient" value={e.patient_name} />
+          {e.line_items.length > 0 && (
+            <ExtractionSection title="Line Items">
+              {e.line_items.map((li, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', color: '#cbd5e1' }}>
+                  <span>{li.description}</span>
+                  <span>{fmtAmount(li.amount)}</span>
+                </div>
+              ))}
+            </ExtractionSection>
+          )}
+          <div style={{ marginTop: '8px', fontWeight: 700, color: '#e2e8f0', display: 'flex', justifyContent: 'space-between' }}>
+            <span>Total</span>
+            <span>{fmtAmount(e.total)}</span>
+          </div>
+        </>
+      )}
+
+      {e.document_type === 'LAB_REPORT' && (
+        <>
+          <Field label="Laboratory" value={e.laboratory_name} />
+          <Field label="Referring Doctor" value={e.referring_doctor} />
+          <Field label="Sample Date" value={e.sample_date} />
+          <Field label="Report Date" value={e.report_date} />
+          {e.tests.length > 0 && (
+            <ExtractionSection title="Tests">
+              {e.tests.map((t, i) => (
+                <div key={i} style={{ marginBottom: '6px', color: '#cbd5e1' }}>
+                  <span style={{ color: '#e2e8f0' }}>{t.test_name}</span>
+                  {t.result && <span> — {t.result}{t.unit ? ` ${t.unit}` : ''}</span>}
+                  {t.reference_range && <span style={{ color: '#64748b' }}> (Ref: {t.reference_range})</span>}
+                  {t.abnormal_flag && <span style={{ color: '#fca5a5' }}> ⚠ Abnormal</span>}
+                </div>
+              ))}
+            </ExtractionSection>
+          )}
+        </>
+      )}
+
+      {e.document_type === 'PHARMACY_BILL' && (
+        <>
+          <Field label="Pharmacy" value={e.pharmacy_name} />
+          <Field label="Bill Number" value={e.bill_number} />
+          <Field label="Date" value={e.bill_date} />
+          <Field label="Patient" value={e.patient_name} />
+          {e.items.length > 0 && (
+            <ExtractionSection title="Medicines">
+              {e.items.map((it, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', color: '#cbd5e1' }}>
+                  <span>
+                    {it.medicine_name}
+                    {it.quantity != null ? ` × ${it.quantity}` : ''}
+                  </span>
+                  <span>{fmtAmount(it.amount)}</span>
+                </div>
+              ))}
+            </ExtractionSection>
+          )}
+          <div style={{ marginTop: '8px', fontWeight: 700, color: '#e2e8f0', display: 'flex', justifyContent: 'space-between' }}>
+            <span>Total</span>
+            <span>{fmtAmount(e.total)}</span>
+          </div>
+        </>
+      )}
+
+      {e.document_type === 'DENTAL_REPORT' && (
+        <>
+          <Field label="Dentist" value={e.dentist.name} />
+          <Field label="Clinic" value={e.dentist.hospital_or_clinic} />
+          <Field label="Date" value={e.date_on_document} />
+          <Field label="Diagnosis" value={e.diagnosis} />
+          <Field label="Procedure" value={e.procedure} />
+          <div style={{ marginTop: '8px', fontWeight: 700, color: '#e2e8f0', display: 'flex', justifyContent: 'space-between' }}>
+            <span>Amount</span>
+            <span>{fmtAmount(e.amount)}</span>
+          </div>
+        </>
+      )}
+
+      {e.document_type === 'DISCHARGE_SUMMARY' && (
+        <>
+          <Field label="Hospital" value={e.hospital_name} />
+          <Field label="Admission" value={e.admission_date} />
+          <Field label="Discharge" value={e.discharge_date} />
+          <Field label="Diagnosis" value={e.diagnosis} />
+          <Field label="Procedure / Treatment" value={e.procedure_or_treatment} />
+          <Field label="Doctor" value={e.doctor.name} />
+          <Field label="Instructions" value={e.discharge_instructions} />
+        </>
+      )}
+
+      <div style={{ marginTop: '10px', fontSize: '11px', color: '#64748b' }}>
+        Extraction confidence: {e.confidence.toFixed(2)}
+      </div>
+    </div>
+  )
+}
+
+function DocumentCard({
+  doc,
+  stoppedAt,
+  extractionFailureReason,
+}: {
+  doc: ClaimResponse['documents'][number]
+  stoppedAt?: string
+  extractionFailureReason?: string
+}) {
+  const [expanded, setExpanded] = useState(false)
   const skipReason =
     doc.processing_status === 'PENDING' && stoppedAt
       ? DOCUMENT_VERIFICATION_SKIP_REASON[stoppedAt]
@@ -120,6 +318,37 @@ function DocumentCard({ doc, stoppedAt }: { doc: ClaimResponse['documents'][numb
           </div>
         </div>
       </div>
+
+      {doc.extraction && (
+        <div style={{ marginTop: '10px' }}>
+          <button
+            type="button"
+            data-testid="toggle-extracted-information"
+            onClick={() => setExpanded(v => !v)}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: '#a5b4fc',
+              fontSize: '12px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              padding: 0,
+            }}
+          >
+            {expanded ? '▾' : '▸'} Extracted Information
+          </button>
+          {expanded && <ExtractedInfo result={doc.extraction} />}
+        </div>
+      )}
+
+      {!doc.extraction && extractionFailureReason && (
+        <p
+          data-testid="extraction-failure-reason"
+          style={{ margin: '10px 0 0', fontSize: '11px', color: '#fca5a5', lineHeight: 1.5 }}
+        >
+          ⚠ Extraction failed for this document: {extractionFailureReason}
+        </p>
+      )}
     </div>
   )
 }
@@ -189,6 +418,9 @@ export function ClaimDetail() {
 
   const dvr = claim.document_verification_result
   const cdvr = claim.cross_document_validation_result
+  const extractionFailuresByFileId = new Map(
+    (claim.extraction_result?.failures ?? []).map(f => [f.file_id, f.reason])
+  )
   const hasProblem = claim.status === 'BLOCKED' || claim.status === 'DOCUMENTS_PENDING'
 
   return (
@@ -252,7 +484,12 @@ export function ClaimDetail() {
         </h2>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           {claim.documents.map(doc => (
-            <DocumentCard key={doc.file_id} doc={doc} stoppedAt={claim.stopped_at} />
+            <DocumentCard
+              key={doc.file_id}
+              doc={doc}
+              stoppedAt={claim.stopped_at}
+              extractionFailureReason={extractionFailuresByFileId.get(doc.file_id)}
+            />
           ))}
         </div>
       </div>

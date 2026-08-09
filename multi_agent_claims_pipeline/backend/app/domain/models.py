@@ -377,6 +377,11 @@ from app.domain.verification import (  # noqa: E402
     ValidationResult,
 )
 
+# Same late-import pattern as above, for the same reason: app.domain.extraction
+# imports DocumentType/DocumentQuality from this module, so Claim can only
+# reference ClaimExtractionResult after those names already exist.
+from app.domain.extraction import ClaimExtractionResult  # noqa: E402
+
 
 def generate_claim_id() -> str:
     """
@@ -397,6 +402,13 @@ class Claim(BaseModel):
     validation, document verification, and cross-document validation.
     They stay None until that stage has actually run — a None
     `document_verification_result` means "not reached yet", not "passed".
+
+    Phase 2B adds `extraction_result`, populated the same way once
+    DocumentExtractionAgent runs (after cross-document validation passes).
+    A None `extraction_result` means either "not reached yet" or "no
+    extraction agent configured" (see ClaimsPipeline) — not "failed"; a
+    per-document extraction failure is recorded inside
+    `extraction_result.failures`, not by leaving the whole field None.
     """
 
     claim_id: str = Field(default_factory=lambda: generate_claim_id())
@@ -413,6 +425,7 @@ class Claim(BaseModel):
     validation_result: Optional[ValidationResult] = None
     document_verification_result: Optional[DocumentVerificationResult] = None
     cross_document_validation_result: Optional[CrossDocumentValidationResult] = None
+    extraction_result: Optional[ClaimExtractionResult] = None
     processing_time_ms: Optional[float] = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)

@@ -27,6 +27,33 @@ TEST_UPLOAD_DIR = "./data/test_claims_api_uploads"
 JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 100
 PDF_BYTES = b"%PDF-1.4\n" + b"x" * 100
 
+# Minimal valid Phase 2B extraction responses (every field the AI-facing
+# schema requires — app/ai/prompts/*_extraction.py — must be present, even
+# as an empty sentinel; the agent does not tolerate a missing key). Appended
+# after classification responses for any test whose claim reaches
+# DOCUMENT_EXTRACTION (i.e. clears document + cross-document validation) —
+# DocumentExtractionAgent makes one more analyze_document call per
+# extractable document, consumed by the same _FakeSequentialAIProvider.
+PRESCRIPTION_EXTRACTION_RESPONSE = {
+    "patient_name": "", "patient_age": "", "patient_gender": "", "patient_date_of_birth": "",
+    "prescription_date": "", "doctor_name": "", "doctor_registration_number": "",
+    "doctor_specialization": "", "doctor_hospital_or_clinic": "", "diagnosis": "", "treatment": "",
+    "medications": [], "investigations": [], "signature_present": "UNCLEAR", "stamp_present": "UNCLEAR",
+    "confidence": 0.85, "warnings": [], "evidence": [],
+}
+HOSPITAL_BILL_EXTRACTION_RESPONSE = {
+    "patient_name": "", "hospital_name": "", "bill_number": "", "bill_date": "",
+    "admission_date": "", "discharge_date": "", "doctor_name": "", "doctor_registration_number": "",
+    "line_items": [], "subtotal": "", "discount": "", "tax": "", "total": "", "currency": "INR",
+    "confidence": 0.85, "warnings": [], "evidence": [],
+}
+LAB_REPORT_EXTRACTION_RESPONSE = {
+    "patient_name": "", "patient_age": "", "patient_gender": "", "referring_doctor": "",
+    "sample_date": "", "report_date": "", "tests": [], "laboratory_name": "",
+    "pathologist_name": "", "registration_number": "",
+    "confidence": 0.85, "warnings": [], "evidence": [],
+}
+
 
 class _FakeSequentialAIProvider:
     """
@@ -196,6 +223,10 @@ async def test_submit_claim_that_clears_phase_2a(client_factory):
     ai_responses = [
         {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.94},
         {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.91},
+        # Extraction stage (Phase 2B) runs next, one more analyze_document
+        # call per document, in the same order.
+        PRESCRIPTION_EXTRACTION_RESPONSE,
+        HOSPITAL_BILL_EXTRACTION_RESPONSE,
     ]
     client = await client_factory(ai_responses)
     response = await client.post("/api/v1/claims", data=data, files=files)
@@ -204,6 +235,11 @@ async def test_submit_claim_that_clears_phase_2a(client_factory):
     assert result["stopped_at"] is None
     assert result["document_verification_result"]["status"] == "PASS"
     assert result["cross_document_validation_result"]["status"] == "PASS"
+    assert result["extraction_result"] is not None
+    assert len(result["extraction_result"]["extractions"]) == 2
+    assert result["extraction_result"]["has_failures"] is False
+    doc_extractions = {d["file_id"]: d["extraction"] for d in result["documents"]}
+    assert all(doc_extractions.values())  # every document has its extraction attached too
 
 
 @pytest.mark.anyio
@@ -323,6 +359,11 @@ async def test_submit_claim_multiple_documents_and_metadata(client_factory):
         {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
         {"document_type": "LAB_REPORT", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
         {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
+        # Extraction stage (Phase 2B) — one more analyze_document call per
+        # document, same order as classification.
+        PRESCRIPTION_EXTRACTION_RESPONSE,
+        LAB_REPORT_EXTRACTION_RESPONSE,
+        HOSPITAL_BILL_EXTRACTION_RESPONSE,
     ]
     client = await client_factory(ai_responses)
     response = await client.post("/api/v1/claims", data=data, files=files)
@@ -331,6 +372,65 @@ async def test_submit_claim_multiple_documents_and_metadata(client_factory):
     assert len(result["documents"]) == 3
     assert result["member_id"] == "EMP001"
     assert result["claim_category"] == "DIAGNOSTIC"
+    assert result["status"] == "PROCESSING"
+    assert len(result["extraction_result"]["extractions"]) == 3
+
+
+@pytest.mark.anyio
+async def test_extraction_result_survives_a_database_round_trip(client_factory):
+    """
+    Regression guard for restart persistence (docs/AI_HANDOFF.md Phase 2B
+    "Restart Persistence"): POST's response is built from the in-memory
+    Claim the pipeline just produced, which would pass even if
+    ClaimRepository never persisted extraction correctly. A separate GET —
+    a fresh ClaimRepository.get_by_id() call, exercising
+    _extraction_result_from_rows' rehydration from
+    ClaimDocumentORM.extraction_json — is what actually proves persistence.
+    """
+    data = {
+        "member_id": "EMP001",
+        "policy_id": "PLUM_GHI_2024",
+        "claim_category": "CONSULTATION",
+        "treatment_date": "2024-11-01",
+        "claimed_amount": "1500",
+    }
+    files = [
+        ("documents", ("rx.jpg", JPEG_BYTES, "image/jpeg")),
+        ("documents", ("bill.jpg", JPEG_BYTES, "image/jpeg")),
+    ]
+    ai_responses = [
+        {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.94},
+        {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.91},
+        {
+            **PRESCRIPTION_EXTRACTION_RESPONSE,
+            "patient_name": "Rajesh Kumar",
+            "diagnosis": "Viral Fever",
+            "doctor_name": "Dr. Arun Sharma",
+            "confidence": 0.88,
+        },
+        {**HOSPITAL_BILL_EXTRACTION_RESPONSE, "hospital_name": "City Clinic", "total": "1500.00", "confidence": 0.9},
+    ]
+    client = await client_factory(ai_responses)
+    submit_response = await client.post("/api/v1/claims", data=data, files=files)
+    claim_id = submit_response.json()["claim_id"]
+
+    get_response = await client.get(f"/api/v1/claims/{claim_id}")
+    assert get_response.status_code == 200
+    result = get_response.json()
+
+    assert result["extraction_result"] is not None
+    assert len(result["extraction_result"]["extractions"]) == 2
+    assert result["extraction_result"]["has_failures"] is False
+
+    rx_doc = next(d for d in result["documents"] if d["document_type"] == "PRESCRIPTION")
+    assert rx_doc["extraction"]["extraction"]["diagnosis"] == "Viral Fever"
+    assert rx_doc["extraction"]["extraction"]["doctor"]["name"] == "Dr. Arun Sharma"
+    assert rx_doc["extraction"]["patient"]["name"] == "Rajesh Kumar"
+
+    bill_doc = next(d for d in result["documents"] if d["document_type"] == "HOSPITAL_BILL")
+    assert bill_doc["extraction"]["extraction"]["hospital_name"] == "City Clinic"
+    assert bill_doc["extraction"]["extraction"]["total"] == "1500.00"
+    assert "storage_reference" not in bill_doc
 
 
 @pytest.mark.anyio

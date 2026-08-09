@@ -45,6 +45,10 @@ class ClaimORM(Base):
     validation_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     document_verification_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     cross_document_validation_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    # Phase 2B: claim-level rollup only (failures/skipped file_ids, ai_calls,
+    # overall confidence) — the heavy per-document payload lives on
+    # ClaimDocumentORM.extraction_json instead (see that model's docstring).
+    extraction_summary_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -74,3 +78,22 @@ class ClaimDocumentORM(Base):
     patient_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     processing_status: Mapped[str] = mapped_column(String(32), default="PENDING")
+
+    # ── Phase 2B: document extraction ───────────────────────────────────────
+    #
+    # Hybrid persistence per docs/component-contracts.md "DocumentExtractionAgent":
+    # a handful of genuinely queryable fields as real columns (diagnosis,
+    # treatment, document_date, doctor_name, total_amount — the fields most
+    # likely to matter to a future SQL query or PolicyEngine lookup) plus
+    # `extraction_json`, the full typed DocumentExtractionResult envelope
+    # (patient/quality/confidence/warnings/evidence/the type-specific
+    # payload), which is what ClaimRepository actually rehydrates from —
+    # the queryable columns are a denormalised projection of it, not a
+    # second source of truth. Never an opaque blob alone (see instruction).
+    extraction_status: Mapped[str] = mapped_column(String(32), default="NOT_ATTEMPTED")
+    diagnosis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    treatment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    document_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    doctor_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    total_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2, asdecimal=True), nullable=True)
+    extraction_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)

@@ -6,12 +6,13 @@
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import '@testing-library/jest-dom'
 import { ClaimDetail } from './ClaimDetail'
 import { claimsApi } from '../services/api'
 import { useClaimTrace } from '../hooks/useClaimTrace'
-import type { ClaimResponse } from '../types'
+import type { ClaimResponse, DocumentExtractionResult } from '../types'
 
 vi.mock('../services/api', () => ({
   claimsApi: { get: vi.fn() },
@@ -174,5 +175,132 @@ describe('ClaimDetail — document results', () => {
     await waitFor(() => expect(screen.getByText('prescription.jpg')).toBeInTheDocument())
     expect(screen.getByText(/Processing…/)).toBeInTheDocument()
     expect(screen.queryByTestId('document-skip-reason')).not.toBeInTheDocument()
+  })
+})
+
+describe('ClaimDetail — extracted information (Phase 2B)', () => {
+  beforeEach(() => {
+    vi.mocked(claimsApi.get).mockReset()
+    vi.mocked(useClaimTrace).mockReturnValue({ events: [], loading: false, error: null, refetch: vi.fn() })
+  })
+
+  const prescriptionExtraction: DocumentExtractionResult = {
+    file_id: 'abc',
+    document_type: 'PRESCRIPTION',
+    quality: 'GOOD',
+    patient: { name: 'Rajesh Kumar' },
+    document_date: '2024-11-01',
+    source: 'ai',
+    extraction: {
+      document_type: 'PRESCRIPTION',
+      confidence: 0.94,
+      warnings: [],
+      evidence: [],
+      patient: { name: 'Rajesh Kumar' },
+      prescription_date: '2024-11-01',
+      doctor: { name: 'Dr. Arun Sharma', registration_number: 'KA/45678/2015' },
+      diagnosis: 'Viral Fever',
+      treatment: undefined,
+      medications: [{ name: 'Paracetamol', strength: '650mg', dosage: '1-1-1', frequency: undefined, duration: '5 days', route: undefined, instructions: undefined }],
+      investigations: ['CBC', 'Dengue NS1'],
+      signature_present: true,
+      stamp_present: true,
+    },
+  }
+
+  it('shows an "Extracted Information" toggle only when the document has an extraction, and expands it on click', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      documents: [
+        {
+          file_id: 'abc',
+          file_name: 'prescription.jpg',
+          document_type: 'PRESCRIPTION',
+          quality: 'GOOD',
+          patient_name: 'Rajesh Kumar',
+          confidence: 0.94,
+          processing_status: 'PROCESSED',
+          extraction: prescriptionExtraction,
+        },
+        {
+          file_id: 'def',
+          file_name: 'no_extraction.jpg',
+          document_type: 'PRESCRIPTION',
+          processing_status: 'PROCESSED',
+        },
+      ],
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByText('prescription.jpg')).toBeInTheDocument())
+    expect(screen.getAllByTestId('toggle-extracted-information')).toHaveLength(1)
+    expect(screen.queryByTestId('extracted-information')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId('toggle-extracted-information'))
+
+    expect(screen.getByTestId('extracted-information')).toBeInTheDocument()
+    expect(screen.getByText('Dr. Arun Sharma')).toBeInTheDocument()
+    expect(screen.getByText('Viral Fever')).toBeInTheDocument()
+    expect(screen.getByText(/Paracetamol 650mg/)).toBeInTheDocument()
+    expect(screen.getByText('CBC, Dengue NS1')).toBeInTheDocument()
+  })
+
+  it('renders extraction warnings when present', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      documents: [
+        {
+          file_id: 'abc',
+          file_name: 'blurry.jpg',
+          document_type: 'PRESCRIPTION',
+          processing_status: 'PROCESSED',
+          extraction: {
+            ...prescriptionExtraction,
+            extraction: {
+              ...prescriptionExtraction.extraction,
+              warnings: ['Doctor registration number could not be read clearly.'],
+            },
+          },
+        },
+      ],
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByText('blurry.jpg')).toBeInTheDocument())
+    await userEvent.click(screen.getByTestId('toggle-extracted-information'))
+
+    expect(
+      screen.getByText(/Doctor registration number could not be read clearly\./)
+    ).toBeInTheDocument()
+  })
+
+  it('shows a failure reason for a document that was not extracted', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      documents: [
+        {
+          file_id: 'abc',
+          file_name: 'corrupt.jpg',
+          document_type: 'PRESCRIPTION',
+          processing_status: 'PROCESSED',
+        },
+      ],
+      extraction_result: {
+        extractions: [],
+        failures: [{ file_id: 'abc', document_type: 'PRESCRIPTION', reason: 'AI provider returned no structured extraction' }],
+        skipped: [],
+        has_failures: true,
+      },
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByText('corrupt.jpg')).toBeInTheDocument())
+    expect(screen.queryByTestId('toggle-extracted-information')).not.toBeInTheDocument()
+    expect(screen.getByTestId('extraction-failure-reason')).toHaveTextContent(
+      'AI provider returned no structured extraction'
+    )
   })
 })

@@ -10,13 +10,16 @@ import pytest
 
 from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
+from app.agents.document_extraction_agent import DocumentExtractionAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
+from app.ai.schemas.ai_schemas import DocumentAnalysisResponse
 from app.domain.errors import AITimeoutError
 from app.domain.models import Claim, ClaimCategory, ClaimStatus, ClaimSubmission, DocumentMetadata
 from app.domain.trace import TraceComponent, TraceContext, TraceEventType
 from app.domain.verification import DocumentClassification
 from app.pipeline.pipeline import ClaimsPipeline
 from app.policy.policy_repository import PolicyRepository
+from app.storage.document_storage import DocumentStorage
 from app.tracing.service import TraceService
 
 
@@ -79,7 +82,12 @@ class TestFullPassThroughPhase2A:
         assert result.cross_document_validation_result.status.value == "PASS"
 
     @pytest.mark.anyio
-    async def test_full_pass_trace_has_no_failed_or_skipped_events(self, policy_repository):
+    async def test_full_pass_trace_has_no_failed_events_and_only_skips_unconfigured_extraction(
+        self, policy_repository
+    ):
+        # build_pipeline() deliberately doesn't pass a document_extraction_agent
+        # (these tests never exercise real AI extraction) — DOCUMENT_EXTRACTION
+        # is legitimately SKIPPED in that case (Phase 2B), not a failure.
         claim = make_claim()
         classifications = {
             "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
@@ -92,7 +100,8 @@ class TestFullPassThroughPhase2A:
 
         event_types = {e.event_type for e in tracer.events}
         assert TraceEventType.FAILED not in event_types
-        assert TraceEventType.SKIPPED not in event_types
+        skipped_components = {e.component for e in tracer.events if e.event_type == TraceEventType.SKIPPED}
+        assert skipped_components == {TraceComponent.DOCUMENT_EXTRACTION}
         assert tracer.events[-1].component == TraceComponent.PIPELINE
         assert tracer.events[-1].event_type == TraceEventType.COMPLETED
 
@@ -187,3 +196,143 @@ class TestGracefulDegradationOnAIFailure:
             if e.component == TraceComponent.PIPELINE and e.event_type == TraceEventType.FAILED
         ]
         assert len(pipeline_failed) == 1
+
+
+# ── Phase 2B: Document Extraction stage ─────────────────────────────────────
+
+
+class _FakeDocumentStorage(DocumentStorage):
+    def __init__(self, contents: dict[str, bytes]):
+        self._contents = contents
+
+    async def save(self, *, claim_id, filename, content):
+        raise NotImplementedError("not needed for these tests")
+
+    async def read(self, storage_reference: str) -> bytes:
+        return self._contents[storage_reference]
+
+
+class _FakeExtractionAIProvider:
+    def __init__(self, responses: list):
+        self._responses = list(responses)
+
+    async def analyze_document(self, request):
+        data = self._responses.pop(0)
+        return DocumentAnalysisResponse(structured_data=data, model="fake-model", provider="fake")
+
+
+_PRESCRIPTION_EXTRACTION_RESPONSE = {
+    "patient_name": "Rajesh Kumar", "patient_age": "", "patient_gender": "", "patient_date_of_birth": "",
+    "prescription_date": "2024-11-01", "doctor_name": "Dr. Arun Sharma", "doctor_registration_number": "",
+    "doctor_specialization": "", "doctor_hospital_or_clinic": "", "diagnosis": "Viral Fever", "treatment": "",
+    "medications": [], "investigations": [], "signature_present": "UNCLEAR", "stamp_present": "UNCLEAR",
+    "confidence": 0.9, "warnings": [], "evidence": [],
+}
+_HOSPITAL_BILL_EXTRACTION_RESPONSE = {
+    "patient_name": "Rajesh Kumar", "hospital_name": "City Clinic", "bill_number": "", "bill_date": "",
+    "admission_date": "", "discharge_date": "", "doctor_name": "", "doctor_registration_number": "",
+    "line_items": [], "subtotal": "", "discount": "", "tax": "", "total": "1500.00", "currency": "INR",
+    "confidence": 0.85, "warnings": [], "evidence": [],
+}
+
+
+def build_pipeline_with_extraction(policy_repository, extraction_provider) -> ClaimsPipeline:
+    storage = _FakeDocumentStorage({"ref1": b"\xff\xd8\xff-a", "ref2": b"\xff\xd8\xff-b"})
+    return ClaimsPipeline(
+        claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
+        document_verification_agent=DocumentVerificationAgent(
+            ai_provider=None, policy_repository=policy_repository
+        ),
+        cross_document_validation_agent=CrossDocumentValidationAgent(),
+        document_extraction_agent=DocumentExtractionAgent(
+            ai_provider=extraction_provider, document_storage=storage
+        ),
+    )
+
+
+class TestDocumentExtractionStage:
+    """
+    Exercises the full pipeline with a real (fake-backed) extraction agent
+    configured — TestFullPassThroughPhase2A above deliberately doesn't
+    configure one, since it predates Phase 2B.
+    """
+
+    @pytest.mark.anyio
+    async def test_extraction_runs_after_cross_document_validation_passes(self, policy_repository):
+        provider = _FakeExtractionAIProvider(
+            [_PRESCRIPTION_EXTRACTION_RESPONSE, _HOSPITAL_BILL_EXTRACTION_RESPONSE]
+        )
+        pipeline = build_pipeline_with_extraction(policy_repository, provider)
+        claim = make_claim(
+            documents=[
+                DocumentMetadata(file_id="F007", file_name="rx.jpg", mime_type="image/jpeg", storage_reference="ref1"),
+                DocumentMetadata(file_id="F008", file_name="bill.jpg", mime_type="image/jpeg", storage_reference="ref2"),
+            ]
+        )
+        classifications = {
+            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
+            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+        }
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.PROCESSING
+        assert result.extraction_result is not None
+        assert len(result.extraction_result.extractions) == 2
+        assert result.extraction_result.has_failures is False
+
+        extraction_events = [e for e in tracer.events if e.component == TraceComponent.DOCUMENT_EXTRACTION]
+        assert any(e.event_type == TraceEventType.COMPLETED for e in extraction_events)
+        completed = next(e for e in extraction_events if e.event_type == TraceEventType.COMPLETED)
+        assert completed.ai_metadata is not None
+        assert completed.ai_metadata.provider == "fake"
+        # PIPELINE-level completion event must reflect Phase 2B, not Phase 2A.
+        assert "2B" in tracer.events[-1].message
+
+    @pytest.mark.anyio
+    async def test_one_failed_extraction_does_not_block_the_claim(self, policy_repository):
+        """A per-document extraction failure degrades confidence/messaging
+        but the claim itself must still reach PROCESSING — extraction
+        failures are not a stop condition (see agent docstring)."""
+        provider = _FakeExtractionAIProvider([AITimeoutError("fake", 60), _HOSPITAL_BILL_EXTRACTION_RESPONSE])
+        pipeline = build_pipeline_with_extraction(policy_repository, provider)
+        claim = make_claim(
+            documents=[
+                DocumentMetadata(file_id="F007", file_name="rx.jpg", mime_type="image/jpeg", storage_reference="ref1"),
+                DocumentMetadata(file_id="F008", file_name="bill.jpg", mime_type="image/jpeg", storage_reference="ref2"),
+            ]
+        )
+        classifications = {
+            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
+            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+        }
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.PROCESSING
+        assert result.extraction_result.has_failures is True
+        assert len(result.extraction_result.extractions) == 1
+        assert len(result.extraction_result.failures) == 1
+        assert "could not be fully processed" in result.user_message.lower()
+
+    @pytest.mark.anyio
+    async def test_no_extraction_agent_configured_is_skipped_not_failed(self, policy_repository):
+        """build_pipeline() (no extraction agent) must remain fully
+        backward-compatible — this is what the evaluation runner and older
+        tests rely on."""
+        claim = make_claim()
+        classifications = {
+            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
+            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+        }
+        pipeline = build_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.PROCESSING
+        assert result.extraction_result is None
+        skipped = [e for e in tracer.events if e.event_type == TraceEventType.SKIPPED]
+        assert any(e.component == TraceComponent.DOCUMENT_EXTRACTION for e in skipped)
