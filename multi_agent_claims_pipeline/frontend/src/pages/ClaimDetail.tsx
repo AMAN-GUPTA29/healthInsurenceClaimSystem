@@ -56,7 +56,24 @@ const PROCESSING_STATUS_LABEL: Record<string, string> = {
   FAILED: '✕ Processing failed',
 }
 
-function DocumentCard({ doc }: { doc: ClaimResponse['documents'][number] }) {
+// A document's processing_status stays PENDING forever once the pipeline
+// stops at CLAIM_VALIDATION — DocumentVerificationAgent never ran, so
+// PENDING here does not mean "in progress," it means "never reached."
+// Derived entirely from real backend fields (claim.stopped_at,
+// doc.processing_status), not a frontend-invented state.
+const DOCUMENT_VERIFICATION_SKIP_REASON: Record<string, string> = {
+  CLAIM_VALIDATION: 'Document verification was skipped because claim validation failed.',
+}
+
+function DocumentCard({ doc, stoppedAt }: { doc: ClaimResponse['documents'][number]; stoppedAt?: string }) {
+  const skipReason =
+    doc.processing_status === 'PENDING' && stoppedAt
+      ? DOCUMENT_VERIFICATION_SKIP_REASON[stoppedAt]
+      : undefined
+  const statusLabel = skipReason
+    ? '○ Not processed'
+    : PROCESSING_STATUS_LABEL[doc.processing_status] ?? doc.processing_status
+
   return (
     <div
       data-testid="document-result-card"
@@ -71,10 +88,16 @@ function DocumentCard({ doc }: { doc: ClaimResponse['documents'][number] }) {
         <span style={{ fontSize: '13px', fontWeight: 600, color: '#e2e8f0' }}>
           {doc.file_name ?? doc.file_id}
         </span>
-        <span style={{ fontSize: '11px', color: '#64748b' }}>
-          {PROCESSING_STATUS_LABEL[doc.processing_status] ?? doc.processing_status}
-        </span>
+        <span style={{ fontSize: '11px', color: '#64748b' }}>{statusLabel}</span>
       </div>
+      {skipReason && (
+        <p
+          data-testid="document-skip-reason"
+          style={{ margin: '0 0 8px', fontSize: '11px', color: '#94a3b8', lineHeight: 1.5 }}
+        >
+          {skipReason}
+        </p>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', fontSize: '12px' }}>
         <div>
           <div style={{ color: '#64748b', marginBottom: '2px' }}>Type</div>
@@ -229,7 +252,7 @@ export function ClaimDetail() {
         </h2>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           {claim.documents.map(doc => (
-            <DocumentCard key={doc.file_id} doc={doc} />
+            <DocumentCard key={doc.file_id} doc={doc} stoppedAt={claim.stopped_at} />
           ))}
         </div>
       </div>

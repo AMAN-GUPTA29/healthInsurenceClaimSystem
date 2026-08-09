@@ -131,4 +131,48 @@ describe('ClaimDetail — document results', () => {
     await waitFor(() => expect(screen.getByText('rx.jpg')).toBeInTheDocument())
     expect(screen.queryByText(/CLM-TEST01\/abc\.jpg/)).not.toBeInTheDocument()
   })
+
+  it('shows "Not processed" with an explanation, not "Processing…", when document verification was skipped because claim validation failed', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      status: 'BLOCKED',
+      stopped_at: 'CLAIM_VALIDATION',
+      user_message: 'Member ID EMP999 was not found on this policy.',
+      documents: [
+        {
+          file_id: 'abc',
+          file_name: 'prescription.jpg',
+          processing_status: 'PENDING',
+        },
+      ],
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByText('prescription.jpg')).toBeInTheDocument())
+    expect(screen.queryByText(/Processing…/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Not processed/)).toBeInTheDocument()
+    expect(
+      screen.getByText('Document verification was skipped because claim validation failed.')
+    ).toBeInTheDocument()
+  })
+
+  it('still shows "Processing…" for a PENDING document when the pipeline did not stop at claim validation', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      documents: [
+        {
+          file_id: 'abc',
+          file_name: 'prescription.jpg',
+          processing_status: 'PENDING',
+        },
+      ],
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByText('prescription.jpg')).toBeInTheDocument())
+    expect(screen.getByText(/Processing…/)).toBeInTheDocument()
+    expect(screen.queryByTestId('document-skip-reason')).not.toBeInTheDocument()
+  })
 })
