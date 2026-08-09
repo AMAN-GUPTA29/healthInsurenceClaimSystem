@@ -220,6 +220,32 @@ class TestAIClassificationPath:
         with pytest.raises(ExtractionError):
             await agent.run(claim_category=ClaimCategory.CONSULTATION, documents=docs, classifications={})
 
+    @pytest.mark.anyio
+    async def test_ai_call_metadata_captured_on_result(self):
+        fake_provider = _FakeAIProvider(
+            {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "", "confidence": 0.8}
+        )
+        agent = DocumentVerificationAgent(ai_provider=fake_provider, policy_repository=PolicyRepository())
+        docs = [DocumentMetadata(file_id="F1", file_name="rx.jpg")]
+
+        result = await agent.run(claim_category=ClaimCategory.CONSULTATION, documents=docs, classifications={})
+
+        assert len(result.ai_calls) == 1
+        assert result.ai_calls[0].provider == "fake"
+        assert result.ai_calls[0].model == "fake-model"
+
+    @pytest.mark.anyio
+    async def test_no_ai_calls_recorded_when_every_document_is_pre_classified(self):
+        docs = [DocumentMetadata(file_id="F1", file_name="rx.jpg")]
+        classifications = {"F1": classification("F1", DocumentType.PRESCRIPTION)}
+        agent = DocumentVerificationAgent(ai_provider=None, policy_repository=PolicyRepository())
+
+        result = await agent.run(
+            claim_category=ClaimCategory.CONSULTATION, documents=docs, classifications=classifications
+        )
+
+        assert result.ai_calls == []
+
 
 class TestConfidence:
     @pytest.mark.anyio

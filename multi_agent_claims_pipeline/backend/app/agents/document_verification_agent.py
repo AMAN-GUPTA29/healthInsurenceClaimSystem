@@ -22,6 +22,7 @@ from app.agents.base_agent import BaseAgent
 from app.ai.prompts.document_verification import build_document_classification_request
 from app.domain.errors import ExtractionError
 from app.domain.models import DocumentMetadata, DocumentQuality, DocumentType
+from app.domain.trace import AITraceMetadata
 from app.domain.verification import (
     DocumentClassification,
     DocumentVerificationResult,
@@ -58,12 +59,15 @@ class DocumentVerificationAgent(BaseAgent):
         classifications = classifications or {}
 
         resolved: List[DocumentClassification] = []
+        ai_calls: List[AITraceMetadata] = []
         for doc in documents:
             existing = classifications.get(doc.file_id)
             if existing is not None:
                 resolved.append(existing)
             else:
-                resolved.append(await self._classify_via_ai(doc))
+                classification, ai_metadata = await self._classify_via_ai(doc)
+                resolved.append(classification)
+                ai_calls.append(ai_metadata)
 
         requirement = self._policy_repository.get_document_requirements(claim_category)
         received_types = [c.document_type for c in resolved]
@@ -102,11 +106,14 @@ class DocumentVerificationAgent(BaseAgent):
             classifications=resolved,
             user_message=message,
             confidence=overall_confidence,
+            ai_calls=ai_calls,
         )
 
     # ── AI Classification ─────────────────────────────────────────────────────
 
-    async def _classify_via_ai(self, doc: DocumentMetadata) -> DocumentClassification:
+    async def _classify_via_ai(
+        self, doc: DocumentMetadata
+    ) -> tuple[DocumentClassification, AITraceMetadata]:
         """
         Classify a document that has no pre-supplied ground truth.
 
@@ -121,6 +128,14 @@ class DocumentVerificationAgent(BaseAgent):
         )
         response = await self.ai_provider.generate_structured(request)
 
+        ai_metadata = AITraceMetadata(
+            provider=response.provider,
+            model=response.model,
+            latency_ms=response.latency_ms,
+            input_tokens=response.usage.input_tokens if response.usage else None,
+            output_tokens=response.usage.output_tokens if response.usage else None,
+        )
+
         try:
             data = response.data
             document_type = DocumentType(data["document_type"])
@@ -130,7 +145,7 @@ class DocumentVerificationAgent(BaseAgent):
         except (KeyError, ValueError) as exc:
             raise ExtractionError(doc.file_id, f"could not parse AI classification: {exc}") from exc
 
-        return DocumentClassification(
+        classification = DocumentClassification(
             file_id=doc.file_id,
             document_type=document_type,
             quality=quality,
@@ -138,6 +153,7 @@ class DocumentVerificationAgent(BaseAgent):
             confidence=confidence,
             source="ai",
         )
+        return classification, ai_metadata
 
     # ── Message Generation ────────────────────────────────────────────────────
 

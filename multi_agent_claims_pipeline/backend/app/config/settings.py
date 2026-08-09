@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     # ── AI Provider ───────────────────────────────────────────────────────────
     ai_provider: AIProvider = AIProvider.GEMINI
     ai_model: str = Field(
-        default="gemini-2.5-flash",
+        default="gemini-flash-latest",
         description="Model identifier for the configured AI provider.",
     )
     ai_temperature: float = Field(default=0.1, ge=0.0, le=2.0)

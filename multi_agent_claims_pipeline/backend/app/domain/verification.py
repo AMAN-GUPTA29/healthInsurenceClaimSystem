@@ -20,6 +20,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.domain.models import DocumentQuality, DocumentType
+from app.domain.trace import AITraceMetadata
 
 # ── Claim Validation ─────────────────────────────────────────────────────────
 
@@ -88,6 +89,11 @@ class DocumentVerificationResult(BaseModel):
     classifications: List[DocumentClassification] = Field(default_factory=list)
     user_message: str = ""
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    ai_calls: List[AITraceMetadata] = Field(
+        default_factory=list,
+        description="One entry per real AI classification call made (empty if every "
+        "document had a pre-supplied classification — fixture or already-known).",
+    )
 
 
 # ── Cross-Document Validation ─────────────────────────────────────────────────

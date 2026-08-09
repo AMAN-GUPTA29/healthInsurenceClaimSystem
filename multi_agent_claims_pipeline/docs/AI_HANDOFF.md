@@ -208,6 +208,12 @@ Mirrors the assignment's explicit graceful-failure requirement ("must continue w
 ### Decision 19: Per-stage trace design — `COMPLETED` for a correct "blocked" verdict, `FAILED` only for real errors
 A document-verification agent that correctly finds a missing document succeeded at its job; that's a `COMPLETED` event with the verdict in `metadata`, never `FAILED`. `FAILED` is reserved for genuine AI/infra problems. Exactly one `PIPELINE`-component event summarises each run: `COMPLETED` (reached the end of Phase 2A), `WARNING` (stopped early for an expected business reason), or `FAILED` (stopped because a stage genuinely errored) — three clean, existing-vocabulary outcomes instead of inventing a new trace concept for "blocked." Full rationale in `docs/architecture.md`.
 
+### Decision 20: Default Gemini model is `gemini-flash-latest`, not a pinned dated version
+Discovered live once a real API key was added: `gemini-2.5-flash` (the Phase 2A default) returns `404 NOT_FOUND: ... no longer available to new users` for this key/project, even though it's still listed by `models.list()`. Rather than pin to whatever dated version happens to work for one specific key today (which will eventually rot the same way), the default is now `gemini-flash-latest` — an alias Google maintains to always point at their current default flash model. Anyone who needs reproducible behavior across model updates can still pin a specific dated version in their own `.env`.
+
+### Decision 21: `AITraceMetadata` capture required a dedicated `ai_calls` field and an `ai_metadata_fn` hook — it wasn't automatic
+Before Decision 21, `AITraceMetadata` existed in the trace schema (Phase 1) but nothing populated it on a successful `DocumentVerificationAgent` classification — the only failure path (an exception) got safe error info, but a success just returned a `DocumentVerificationResult` with no AI-call record attached. Fixed by adding `DocumentVerificationResult.ai_calls: List[AITraceMetadata]` (one entry per real classification call — empty when every document was pre-classified) and a new `ai_metadata_fn` parameter on `ClaimsPipeline._run_stage`, wired only for the `DOCUMENT_VERIFICATION` stage. Verified against a real successful call — see "Real AI Verification" above.
+
 ---
 
 ## Files/Directories Created
@@ -353,7 +359,7 @@ Required environment variables (place `.env` at the **project root**,
 
 ```bash
 AI_PROVIDER=gemini
-AI_MODEL=gemini-2.5-flash           # or gemini-2.5-pro, gemini-2.0-flash
+AI_MODEL=gemini-flash-latest         # see Decision 20 for why not a pinned dated version
 GEMINI_API_KEY=...                  # SECRET — never commit
 AI_TIMEOUT_SECONDS=60
 DATABASE_URL=sqlite+aiosqlite:///./data/claims.db
@@ -405,43 +411,68 @@ Also verified: a direct `sqlite3` query against `data/claims.db` confirming
 
 ---
 
-## Real AI Verification (Phase 2A, section 45)
+## Real AI Verification (Phase 2A, section 45) — ✅ FULLY VERIFIED 2026-08-09
 
-**No real `GEMINI_API_KEY` is available in this environment** — `.env` only
-holds the `.env.example` placeholder. Per instructions, this is reported
-honestly rather than fabricated.
+A real `GEMINI_API_KEY` was added to `.env` partway through this phase.
+Two rounds of live verification followed.
 
-What *was* verified live: submitted a claim over real HTTP with a document
-that had no pre-supplied classification (`declared_type` only, no
-`actual_type`) — forcing `DocumentVerificationAgent` down its real-AI
-branch. Result:
+### Round 1 — invalid key (before the real key was added)
+Submitted a claim over real HTTP with a document that had no pre-supplied
+classification (`declared_type` only, no `actual_type`), forcing
+`DocumentVerificationAgent` down its real-AI branch, using the
+`.env.example` placeholder key:
 1. **The call genuinely reached Google's Gemini API** — took ~7.4s (a real
    network round-trip, not an instant mock failure) and Google's own
-   server responded `400 INVALID_ARGUMENT: API key not valid. Please pass
-   a valid API key.` This also confirms the request was well-formed enough
-   for Google to process and specifically reject on auth, not malformed
-   structure — i.e., the `AIStructuredRequest` → Gemini `response_schema`
-   translation is correct.
-2. **The agent contains no vendor SDK import** — confirmed by
-   `tests/unit/test_ai_provider.py`'s existing isolation tests plus manual
-   inspection of `document_verification_agent.py`.
-3. **Provider/model info would be captured** — `AITraceMetadata` exists in
-   the trace schema for this; not populated in this run because
-   `generate_structured()` raised before returning a response (nothing to
-   attach it to) — expected behavior, not a gap.
-4. **No API key appeared in the trace, logs, or HTTP response** — grepped
-   the trace API response for the literal placeholder key value: zero
-   matches. `redact_metadata` would strip it from metadata regardless; the
-   error text itself is Google's own message, which doesn't echo the key.
-5. **The failure degraded gracefully** — recorded as `FAILED` in the trace
-   with structured `AIProviderError` info, `DOCUMENT_VERIFICATION`'s result
-   stayed `None` (never fabricated as a pass), and the claim came back as
-   a normal `201` response with `status=BLOCKED` and an apologetic
-   `user_message` — not a 500.
+   server responded `400 INVALID_ARGUMENT: API key not valid.` — confirming
+   the request was well-formed enough for Google to process and reject
+   specifically on auth, not malformed structure.
+2. **No API key appeared in the trace, logs, or HTTP response.**
+3. **The failure degraded gracefully** — `FAILED` in the trace with
+   structured `AIProviderError` info, `DOCUMENT_VERIFICATION`'s result
+   stayed `None` (never fabricated as a pass), claim came back as a normal
+   `201` with `status=BLOCKED` — not a 500.
 
-**Outstanding**: a full successful round-trip (real key → real classification
-→ real `AITraceMetadata` with token counts) has not been verified and needs
-a real `GEMINI_API_KEY` in `.env` to close out.
+### Round 2 — real key, full successful round-trip
+With the real key in place, the configured default model
+(`gemini-2.5-flash`) turned out to be **rejected with `404 NOT_FOUND: This
+model ... is no longer available to new users`** — a real, useful finding:
+the key authenticated fine (proving it's genuinely valid), but that
+specific dated model version isn't available for this key/project.
+Queried `client.aio.models.list()` live and switched the default to
+**`gemini-flash-latest`** (an alias that always resolves to Google's
+current default flash model — see Decision 20) in `.env`, `.env.example`,
+and `Settings.ai_model`'s default.
+
+With that model, submitted a claim (`CLM-4B588B3B`) with two documents and
+no pre-supplied classification. Confirmed via the live `GET
+/api/v1/claims/{id}` and `GET /api/v1/claims/{id}/trace` responses:
+1. **Both documents genuinely classified by Gemini** — `source: "ai"` on
+   both, `PRESCRIPTION`/`HOSPITAL_BILL` correctly identified from
+   filename + declared type alone; `quality: "UNKNOWN"` and `patient_name:
+   null` on both (the model correctly declined to guess what it couldn't
+   see from text alone — exactly what the prompt's "be conservative, never
+   invent" instructions asked for).
+2. **Structured output parsed correctly** into `DocumentClassification`
+   with no `ExtractionError`.
+3. **Provider/model information captured appropriately** — the
+   `DOCUMENT_VERIFICATION` `COMPLETED` trace event's `ai_metadata` field
+   now shows `{"provider": "gemini", "model": "gemini-flash-latest",
+   "latency_ms": 5765.0, "input_tokens": 161, "output_tokens": 48}` — real
+   values, not fabricated. (This required adding an `ai_calls: List[AITrace
+   Metadata]` field to `DocumentVerificationResult` and passing it through
+   `_run_stage`'s new `ai_metadata_fn` parameter — see Decision 21; before
+   this, `AITraceMetadata` existed in the trace schema but nothing
+   populated it on a successful classification.)
+4. **No API key appeared anywhere** — grepped the full trace response for
+   the literal key value: zero matches.
+5. **The pipeline reached the end of Phase 2A cleanly** —
+   `status=PROCESSING`, `document_verification_result.status=PASS`,
+   `cross_document_validation_result.status=PASS` (correctly `PASS` with
+   an explanatory message, not a mismatch — neither document had an
+   extractable patient name to compare).
+
+**Nothing outstanding** — all five of section 45's checklist items are now
+verified against a real, successful call.
 
 ---
 
@@ -461,12 +492,7 @@ a real `GEMINI_API_KEY` in `.env` to close out.
    under high concurrency. For Phase 2+ evaluation with many concurrent test cases,
    consider PostgreSQL.
 
-4. **No real Gemini API key has been exercised yet** — `.env` currently holds the
-   placeholder from `.env.example`. `initialize()` (client construction) succeeds
-   with any non-empty string since the SDK doesn't validate the key until the first
-   real call; a live call will fail auth until a real `GEMINI_API_KEY` is set.
-
-5. **`AsyncClient` + `ASGITransport` never triggers FastAPI's lifespan** — discovered
+4. **`AsyncClient` + `ASGITransport` never triggers FastAPI's lifespan** — discovered
    while writing `test_trace_api.py`. `init_database()` only runs under a real ASGI
    server (uvicorn) or an explicit lifespan manager; the health-check tests never
    surfaced this because `/health` doesn't touch the database. Any new integration
@@ -475,14 +501,14 @@ a real `GEMINI_API_KEY` in `.env` to close out.
    pattern) rather than relying on the app's lifespan to have run. Production is
    unaffected — verified live under real `uvicorn`.
 
-6. **`TraceService` has no dedicated error type for persistence failures** — if the
+5. **`TraceService` has no dedicated error type for persistence failures** — if the
    `sink` (`TraceRepository`) raises (e.g. DB connection lost), that exception
    propagates as whatever SQLAlchemy/aiosqlite raised, not a `ClaimsSystemError`.
    Acceptable for Phase 1 (no pipeline exists yet to need graceful degradation from
    a tracing failure specifically); revisit if Phase 2 wants tracing failures to
    never take down claim processing.
 
-7. **Frontend `npm audit` reports 7 vulnerabilities** (1 critical, 1 high, 5
+6. **Frontend `npm audit` reports 7 vulnerabilities** (1 critical, 1 high, 5
    moderate) after adding `vitest`/`jsdom`/`@testing-library/*` for the
    `TraceViewer` test. The production-affecting one is `react-router-dom`
    (moderate, open-redirect-class) — pre-existing from Phase 0, fix requires a
@@ -491,28 +517,34 @@ a real `GEMINI_API_KEY` in `.env` to close out.
    dev-server CVEs that only matter if a dev server is exposed publicly). Run
    `npm audit` before a production deploy and decide then.
 
-8. **Document classification is text-only (filename + declared type), not real
+7. **Document classification is text-only (filename + declared type), not real
    OCR/vision** — no file-upload pipeline exists yet in Phase 2A, so the one real
-   AI call `DocumentVerificationAgent` makes has very little to go on. This is a
-   genuine real AI call (verified live, see above), just not real document
-   *understanding* yet. `app/ai/prompts/document_verification.py`'s `hint_text`
-   parameter is the designed extension point for OCR text / inline image parts.
+   AI call `DocumentVerificationAgent` makes has very little to go on. **Fully
+   verified working with a real key** (see "Real AI Verification" above) — the
+   model correctly self-reports `quality: UNKNOWN` rather than guessing, which is
+   the right behavior given how little it has to go on; it's real document
+   *understanding* that's still missing, not a broken integration.
+   `app/ai/prompts/document_verification.py`'s `hint_text` parameter is the
+   designed extension point for OCR text / inline image parts.
 
-9. **`LATE_SUBMISSION` (submission-deadline) validation is not implemented** —
+8. **`LATE_SUBMISSION` (submission-deadline) validation is not implemented** —
    deliberate scope decision, see Decision 15. `RejectionReason.LATE_SUBMISSION`
    already exists in the domain error vocabulary for whenever this is added.
 
-10. **No real `GEMINI_API_KEY` has been exercised for a *successful* AI call** —
-    see "Real AI Verification" above for exactly what was and wasn't verified.
+9. **Cross-document patient-name matching is exact (case/whitespace-insensitive),
+   not fuzzy** — "Rajesh Kumar" vs. "Raj Kumar" would not match. Documented
+   limitation in `docs/component-contracts.md`, not a bug; revisit if real OCR
+   output turns out to need typo tolerance.
 
-11. **Cross-document patient-name matching is exact (case/whitespace-insensitive),
-    not fuzzy** — "Rajesh Kumar" vs. "Raj Kumar" would not match. Documented
-    limitation in `docs/component-contracts.md`, not a bug; revisit if real OCR
-    output turns out to need typo tolerance.
-
-12. **`ClaimRepository`'s Decimal columns use `Numeric(12, 2)`** — sufficient for
+10. **`ClaimRepository`'s Decimal columns use `Numeric(12, 2)`** — sufficient for
     the assignment's INR amounts (max seen: ₹50,000 annual OPD limit) but worth
     widening if a future policy uses larger sums insured.
+
+11. **Gemini's real classification latency is ~5s per document** with no
+    pre-supplied ground truth (two sequential calls took ~10.6s total for a
+    2-document claim in live testing) — `DocumentVerificationAgent` classifies
+    documents one at a time, not concurrently. Fine for Phase 2A single-claim
+    testing; worth parallelizing (`asyncio.gather`) before real submission volume.
 
 ### Resolved this session
 - ~~Node.js not installed~~ — installed; `npm install` and `npm run build` verified working.
@@ -543,6 +575,17 @@ a real `GEMINI_API_KEY` in `.env` to close out.
 - ~~`.replace('_', ' ')` in `ClaimSubmission.tsx` only replaced the first
   underscore~~ (`PRE_AUTH_LETTER` displayed as "PRE AUTH_LETTER") — found live in
   the browser; fixed to a global regex everywhere it's used.
+- ~~No real `GEMINI_API_KEY` had been exercised~~ — a real key was added to
+  `.env`; see "Real AI Verification" above for the full round of live testing
+  this triggered.
+- ~~Default model `gemini-2.5-flash` returns `404: no longer available to new
+  users` for this API key~~ — found live the moment a real key was tested;
+  switched default to `gemini-flash-latest`. See Decision 20.
+- ~~`AITraceMetadata` was never actually populated on a successful AI
+  classification~~ — found while doing the real-key verification (Decision 20
+  surfaced it: without a real key, every prior test hit the *failure* path,
+  which already attached error info; nothing had exercised the *success* path
+  far enough to notice the metadata was always `null`). Fixed — see Decision 21.
 
 ---
 

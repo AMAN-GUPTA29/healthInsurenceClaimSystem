@@ -365,9 +365,9 @@ Submission-deadline checking (`LATE_SUBMISSION`) is not implemented — see Deci
 |----------|-------|
 | Purpose | Determine what document types were submitted, what's required (from `PolicyRepository`), what's missing/wrong/unreadable, and whether processing can continue. |
 | Input | `run(*, claim_category, documents: List[DocumentMetadata], classifications: Optional[Dict[str, DocumentClassification]])` |
-| Output | `DocumentVerificationResult { status, required_documents, received_documents, missing_documents, wrong_documents, quality_issues, classifications, user_message, confidence }` |
+| Output | `DocumentVerificationResult { status, required_documents, received_documents, missing_documents, wrong_documents, quality_issues, classifications, user_message, confidence, ai_calls }` |
 | Dependencies | `AIProvider` (via `BaseAgent`) + `PolicyRepository` |
-| AI interaction | For each document **without** a pre-supplied `DocumentClassification`, calls `AIProvider.generate_structured()` with the prompt/schema in `app/ai/prompts/document_verification.py`. Documents that already have one (evaluation fixtures, or a real document classified earlier) skip the AI call entirely. |
+| AI interaction | For each document **without** a pre-supplied `DocumentClassification`, calls `AIProvider.generate_structured()` with the prompt/schema in `app/ai/prompts/document_verification.py`. Documents that already have one (evaluation fixtures, or a real document classified earlier) skip the AI call entirely. Each real call's `AITraceMetadata` (provider, model, latency, token counts) is collected into `ai_calls` — empty if every document was pre-classified. Verified against a real successful Gemini call — see `docs/AI_HANDOFF.md` "Real AI Verification." |
 | Errors | `ExtractionError` if the AI response can't be parsed into a valid `DocumentClassification` (invalid enum value, missing field) |
 | Failure behavior | Raises on a genuine AI/parse failure — the caller (`ClaimsPipeline`) is responsible for catching this and degrading gracefully; the agent itself does not swallow errors or silently assume a document is valid |
 
@@ -430,7 +430,7 @@ No file-upload/OCR pipeline exists yet, so the AI path classifies from **filenam
 | Output | The same `Claim`, mutated in place: `status`, `stopped_at`, `user_message`, and whichever `*_result` fields the reached stages populated |
 | Execution order | Claim Validation → Document Verification → Cross-Document Validation, each gated on the previous stage's result |
 | Stopping conditions | `ValidationResult.valid == False` → stop after stage 1; `DocumentVerificationResult.status != PASS` → stop after stage 2; `CrossDocumentValidationResult.status != PASS` → stop after stage 3 |
-| Trace behavior | One `TraceContext`/`TraceService` per claim, injected by the caller (never constructed internally). Each stage emits `STARTED` → `COMPLETED` (with metadata/confidence) or `FAILED`; unreached stages get `SKIPPED`; exactly one `PIPELINE`-component event summarises the run (`COMPLETED`/`WARNING`/`FAILED`) — see `docs/architecture.md` for the full rationale. |
+| Trace behavior | One `TraceContext`/`TraceService` per claim, injected by the caller (never constructed internally). Each stage emits `STARTED` → `COMPLETED` (with metadata/confidence, and — for `DOCUMENT_VERIFICATION` only — `ai_metadata` from any real AI call made) or `FAILED`; unreached stages get `SKIPPED`; exactly one `PIPELINE`-component event summarises the run (`COMPLETED`/`WARNING`/`FAILED`) — see `docs/architecture.md` for the full rationale. |
 | **Guarantee** | **Never raises.** A genuine stage failure (AI timeout, parse error) is caught per-stage, recorded as `FAILED` in the trace, and reflected back as a degraded `Claim` (`status=BLOCKED`, an explanatory `user_message`) rather than propagating — see `_degrade()`. This mirrors the assignment's graceful-failure requirement (verified live — see `docs/AI_HANDOFF.md`). |
 | Failure behavior | Downstream stages after a failure get `SKIPPED`; the failing stage's result field stays `None` (never fabricated as if it had passed) |
 

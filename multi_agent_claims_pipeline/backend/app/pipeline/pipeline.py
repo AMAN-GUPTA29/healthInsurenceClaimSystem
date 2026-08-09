@@ -141,8 +141,10 @@ class ClaimsPipeline:
                     "missing_documents": [t.value for t in r.missing_documents],
                     "wrong_documents": [t.value for t in r.wrong_documents],
                     "quality_issue_count": len(r.quality_issues),
+                    "ai_calls_made": len(r.ai_calls),
                 },
                 confidence_fn=lambda r: r.confidence,
+                ai_metadata_fn=lambda r: r.ai_calls[0] if r.ai_calls else None,
             )
         except Exception as exc:
             return await self._degrade(
@@ -277,12 +279,17 @@ class ClaimsPipeline:
         *,
         metadata_fn: Callable[[T], Dict[str, Any]],
         confidence_fn: Optional[Callable[[T], Optional[float]]] = None,
+        ai_metadata_fn: Optional[Callable[[T], Optional[Any]]] = None,
     ) -> T:
         """
         Run one stage with STARTED/COMPLETED-with-metadata/FAILED trace
         events. A stage that runs to completion (even with a "blocked"
         business verdict) is COMPLETED; only an actual raised exception
         (AI timeout, parse error, etc.) is FAILED.
+
+        `ai_metadata_fn`, when given, extracts an `AITraceMetadata` from the
+        stage result to attach to the COMPLETED event — used only by
+        DOCUMENT_VERIFICATION, the one stage that can make a real AI call.
         """
         t0 = time.monotonic()
         await tracer.started(component)
@@ -297,5 +304,6 @@ class ClaimsPipeline:
                 duration_ms=(time.monotonic() - t0) * 1000,
                 metadata=metadata_fn(result),
                 confidence=confidence_fn(result) if confidence_fn else None,
+                ai_metadata=ai_metadata_fn(result) if ai_metadata_fn else None,
             )
             return result
