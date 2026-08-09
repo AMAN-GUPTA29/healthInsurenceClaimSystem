@@ -13,7 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import JSON, Date, DateTime, Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.repositories.database import Base
@@ -51,7 +51,13 @@ class ClaimORM(Base):
 
 
 class ClaimDocumentORM(Base):
-    """One row per document metadata entry on a claim."""
+    """
+    One row per document metadata entry on a claim.
+
+    `storage_reference` is persisted (DocumentVerificationAgent/future
+    reprocessing needs it to re-read the file) but deliberately never
+    surfaced through the API — see ClaimDocumentSummary in app/api/v1/schemas.py.
+    """
 
     __tablename__ = "claim_documents"
 
@@ -59,6 +65,12 @@ class ClaimDocumentORM(Base):
     claim_id: Mapped[str] = mapped_column(String(32), ForeignKey("claims.claim_id"), index=True)
     file_id: Mapped[str] = mapped_column(String(64))
     file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    mime_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    storage_reference: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     declared_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     detected_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     quality: Mapped[str] = mapped_column(String(32), default="UNKNOWN")
+    patient_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    processing_status: Mapped[str] = mapped_column(String(32), default="PENDING")

@@ -1,32 +1,39 @@
 """
 DocumentInputAdapter — the single input boundary for claim documents.
 
-Both a real API caller and the evaluation runner (converting
-test_cases.json fixtures) submit the *same* request shape:
-ClaimSubmissionRequest. A real caller only ever fills in the fields a
-member would actually know (file_id, file_name, declared_type). The
-evaluation fixtures additionally carry ground-truth fields
-(actual_type/quality/patient_name_on_doc) that stand in for what a real
-AI classification would have produced — this adapter is what tells those
-two apart and produces one common internal representation:
+Two entry points converge on the same internal representation
+(ClaimSubmission, plus a classifications map for any pre-known ground
+truth), which is all ClaimsPipeline / DocumentVerificationAgent ever see:
 
-    ClaimSubmissionRequest -> (ClaimSubmission, {file_id: DocumentClassification})
+1. `to_domain(ClaimSubmissionRequest)` — the evaluation path. Used by
+   app/evaluation/runner.py to convert test_cases.json fixtures, which
+   carry ground-truth fields (actual_type/quality/patient_name_on_doc)
+   standing in for what a real AI classification would have produced.
+   DocumentVerificationAgent uses a pre-supplied classification when one
+   exists in the returned map, skipping the AI call for that document.
 
-DocumentVerificationAgent then uses a pre-supplied classification when one
-exists in that dict, and falls back to a real AI call otherwise (see
-app/agents/document_verification_agent.py). This adapter contains no
-business rules of its own (no "is this claim valid" logic) and no
-knowledge of specific test cases — it is purely a shape conversion, kept
-outside every business agent as required.
+2. `from_uploads(...)` — the real production path (Phase 2A correction).
+   Takes actual uploaded file bytes, validates and persists each one via
+   DocumentStorage, and returns a ClaimSubmission with NO pre-supplied
+   classifications at all — every real document is always classified by
+   the real AIProvider from its actual content. There is no ground truth
+   to fabricate for a real upload; the adapter's job here is purely
+   validation + storage + shape conversion.
+
+This adapter contains no business rules of its own (no "is this claim
+valid" logic) and no knowledge of specific test cases — kept outside
+every business agent as required.
 """
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Protocol, Tuple
 
 from pydantic import BaseModel, Field
 
+from app.domain.errors import EmptyDocumentError
 from app.domain.models import (
     ClaimCategory,
     ClaimHistoryItem,
@@ -36,7 +43,7 @@ from app.domain.models import (
     DocumentType,
 )
 from app.domain.verification import DocumentClassification
-from datetime import date
+from app.storage.document_storage import DocumentStorage, validate_upload
 
 
 class ClaimDocumentInput(BaseModel):
@@ -74,8 +81,79 @@ class ClaimSubmissionRequest(BaseModel):
     simulate_component_failure: bool = False
 
 
+class UploadLike(Protocol):
+    """
+    The minimal shape this adapter needs from an uploaded file — matches
+    FastAPI's UploadFile exactly, without importing FastAPI into this
+    module (keeps the adapter testable/usable outside the web framework).
+    """
+
+    filename: Optional[str]
+    content_type: Optional[str]
+
+    async def read(self) -> bytes: ...
+
+
 class DocumentInputAdapter:
-    """Converts ClaimSubmissionRequest into the pipeline's internal input shape."""
+    """Converts a claim submission (fixture-shaped or real uploads) into the
+    pipeline's internal input shape."""
+
+    async def from_uploads(
+        self,
+        *,
+        member_id: str,
+        policy_id: str,
+        claim_category: ClaimCategory,
+        treatment_date: date,
+        claimed_amount: Decimal,
+        hospital_name: Optional[str],
+        ytd_claims_amount: Decimal,
+        uploads: List[UploadLike],
+        claim_id: str,
+        storage: DocumentStorage,
+        simulate_component_failure: bool = False,
+    ) -> ClaimSubmission:
+        """
+        Real production path: validate + persist each uploaded file, build
+        a ClaimSubmission with no pre-supplied classifications — every
+        document here gets classified from its actual content by the real
+        AIProvider (see DocumentVerificationAgent). No document type is
+        ever assumed from a filename or a UI selection.
+        """
+        if not uploads:
+            raise EmptyDocumentError()
+
+        documents: List[DocumentMetadata] = []
+        for upload in uploads:
+            content = await upload.read()
+            filename = upload.filename or "document"
+            media_type = validate_upload(
+                filename=filename, content_type=upload.content_type, content=content
+            )
+            storage_reference = await storage.save(claim_id=claim_id, filename=filename, content=content)
+            generated_name = storage_reference.rsplit("/", 1)[-1]
+            file_id = generated_name.rsplit(".", 1)[0]  # strip extension, keep the generated UUID
+            documents.append(
+                DocumentMetadata(
+                    file_id=file_id,
+                    file_name=filename,
+                    mime_type=media_type.value,
+                    size_bytes=len(content),
+                    storage_reference=storage_reference,
+                )
+            )
+
+        return ClaimSubmission(
+            member_id=member_id,
+            policy_id=policy_id,
+            claim_category=claim_category,
+            treatment_date=treatment_date,
+            claimed_amount=claimed_amount,
+            hospital_name=hospital_name,
+            documents=documents,
+            ytd_claims_amount=ytd_claims_amount,
+            simulate_component_failure=simulate_component_failure,
+        )
 
     def to_domain(
         self, request: ClaimSubmissionRequest

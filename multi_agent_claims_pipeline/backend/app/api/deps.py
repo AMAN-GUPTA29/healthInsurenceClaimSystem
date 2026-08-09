@@ -27,6 +27,7 @@ from app.policy.policy_repository import PolicyRepository
 from app.repositories.claim_repository import ClaimRepository
 from app.repositories.trace_repository import TraceRepository
 from app.services.document_input_adapter import DocumentInputAdapter
+from app.storage.document_storage import DocumentStorage, LocalFileDocumentStorage
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -114,20 +115,42 @@ def get_document_input_adapter() -> DocumentInputAdapter:
 DocumentInputAdapterDep = Annotated[DocumentInputAdapter, Depends(get_document_input_adapter)]
 
 
+@lru_cache(maxsize=1)
+def _get_document_storage_singleton() -> DocumentStorage:
+    """
+    Cached singleton, same reasoning as the policy repository — one local
+    storage root for the process lifetime. Swapping to S3/object storage
+    later means changing this one function; nothing else in the app
+    depends on which DocumentStorage implementation is configured.
+    """
+    settings = get_settings()
+    return LocalFileDocumentStorage(base_dir=settings.upload_dir)
+
+
+def get_document_storage() -> DocumentStorage:
+    return _get_document_storage_singleton()
+
+
+DocumentStorageDep = Annotated[DocumentStorage, Depends(get_document_storage)]
+
+
 def get_claims_pipeline(
     ai_provider: AIProviderDep,
     policy_repository: PolicyRepositoryDep,
+    document_storage: DocumentStorageDep,
 ) -> ClaimsPipeline:
     """
     Builds a fresh ClaimsPipeline per request. Agents are cheap, stateless
-    objects (all real state — the AI provider, the loaded policy — is
-    injected, not owned), so there's no benefit to caching the pipeline
-    itself the way the AI provider/policy repository are cached.
+    objects (all real state — the AI provider, the loaded policy, document
+    storage — is injected, not owned), so there's no benefit to caching the
+    pipeline itself the way the singletons above are cached.
     """
     return ClaimsPipeline(
         claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
         document_verification_agent=DocumentVerificationAgent(
-            ai_provider=ai_provider, policy_repository=policy_repository
+            ai_provider=ai_provider,
+            policy_repository=policy_repository,
+            document_storage=document_storage,
         ),
         cross_document_validation_agent=CrossDocumentValidationAgent(),
     )

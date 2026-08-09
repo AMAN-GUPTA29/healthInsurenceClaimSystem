@@ -6,11 +6,20 @@ claim category (from PolicyRepository, never hardcoded), what's missing,
 what's unreadable, and whether processing can continue.
 
 For each document, uses a pre-supplied DocumentClassification if one was
-given (evaluation fixtures / already-classified real documents); otherwise
-calls the injected AIProvider to classify it. This is the one place in
+given (evaluation fixtures only — see DocumentInputAdapter); otherwise
+classifies it via the injected AIProvider. This is the one place in
 Phase 2A that makes a real AI call — and the only place that logic lives,
 so the "fixture vs. real" distinction never leaks into CrossDocumentValidationAgent
 or ClaimsPipeline.
+
+Real uploads (Phase 2A correction) are classified from their *actual file
+content*: if a document has a `storage_reference`, this agent reads the
+real bytes via the injected DocumentStorage and sends them through
+`AIProvider.analyze_document()` — the provider's native multimodal
+capability. A document's filename or member-declared type is never treated
+as its classification; only the AI's read of the real content is. Text-only
+classification (filename + declared type, no bytes) is a fallback for the
+rare case a document has no stored content at all.
 """
 
 from __future__ import annotations
@@ -19,9 +28,13 @@ from collections import Counter
 from typing import Dict, List, Optional
 
 from app.agents.base_agent import BaseAgent
-from app.ai.prompts.document_verification import build_document_classification_request
+from app.ai.prompts.document_verification import (
+    build_document_analysis_request,
+    build_document_classification_request,
+)
+from app.ai.schemas.ai_schemas import MediaType
 from app.domain.errors import ExtractionError
-from app.domain.models import DocumentMetadata, DocumentQuality, DocumentType
+from app.domain.models import DocumentMetadata, DocumentProcessingStatus, DocumentQuality, DocumentType
 from app.domain.trace import AITraceMetadata
 from app.domain.verification import (
     DocumentClassification,
@@ -29,6 +42,7 @@ from app.domain.verification import (
     DocumentVerificationStatus,
 )
 from app.policy.policy_repository import PolicyRepository
+from app.storage.document_storage import DocumentStorage
 
 _UNREADABLE_QUALITIES = {DocumentQuality.UNREADABLE, DocumentQuality.PARTIAL}
 
@@ -38,16 +52,33 @@ def _label(document_type: DocumentType) -> str:
     return document_type.value.replace("_", " ").title()
 
 
+def _media_type_for(mime_type: Optional[str]) -> MediaType:
+    """
+    mime_type -> MediaType, defaulting to JPEG if unset/unrecognised.
+    In practice this is always set correctly by DocumentStorage's upload
+    validation before a document ever reaches this agent — the fallback
+    only matters for documents constructed outside that path (e.g. tests).
+    """
+    normalized = (mime_type or "").lower()
+    if normalized == "application/pdf":
+        return MediaType.PDF
+    if normalized == "image/png":
+        return MediaType.PNG
+    return MediaType.JPEG
+
+
 class DocumentVerificationAgent(BaseAgent):
     def __init__(
         self,
         *,
         ai_provider,
         policy_repository: PolicyRepository,
+        document_storage: Optional[DocumentStorage] = None,
         agent_name: Optional[str] = None,
     ) -> None:
         super().__init__(ai_provider=ai_provider, agent_name=agent_name)
         self._policy_repository = policy_repository
+        self._document_storage = document_storage
 
     async def run(
         self,
@@ -117,27 +148,18 @@ class DocumentVerificationAgent(BaseAgent):
         """
         Classify a document that has no pre-supplied ground truth.
 
-        Phase 2A has no file-upload/OCR pipeline yet, so this is a
-        text-only classification from the filename and declared type — see
-        app/ai/prompts/document_verification.py for why, and what changes
-        when real uploads land.
+        Real uploads (have a `storage_reference`) are classified from their
+        actual file content via `AIProvider.analyze_document()` — the
+        provider's native multimodal capability. A document with no stored
+        content (shouldn't normally happen for a real upload) falls back to
+        a text-only classification from filename + declared type.
         """
-        request = build_document_classification_request(
-            file_name=doc.file_name,
-            declared_type=doc.declared_type,
-        )
-        response = await self.ai_provider.generate_structured(request)
-
-        ai_metadata = AITraceMetadata(
-            provider=response.provider,
-            model=response.model,
-            latency_ms=response.latency_ms,
-            input_tokens=response.usage.input_tokens if response.usage else None,
-            output_tokens=response.usage.output_tokens if response.usage else None,
-        )
+        if doc.storage_reference is not None and self._document_storage is not None:
+            data, ai_metadata = await self._classify_from_content(doc)
+        else:
+            data, ai_metadata = await self._classify_from_text_only(doc)
 
         try:
-            data = response.data
             document_type = DocumentType(data["document_type"])
             quality = DocumentQuality(data["quality"])
             patient_name = data.get("patient_name") or None
@@ -154,6 +176,45 @@ class DocumentVerificationAgent(BaseAgent):
             source="ai",
         )
         return classification, ai_metadata
+
+    async def _classify_from_content(self, doc: DocumentMetadata) -> tuple[dict, AITraceMetadata]:
+        """Real path: read the actual bytes and analyze them via the provider's
+        native document/vision capability. Never infers type from filename alone."""
+        content = await self._document_storage.read(doc.storage_reference)
+        media_type = _media_type_for(doc.mime_type)
+        request = build_document_analysis_request(
+            file_name=doc.file_name, content=content, media_type=media_type
+        )
+        response = await self.ai_provider.analyze_document(request)
+
+        ai_metadata = AITraceMetadata(
+            provider=response.provider,
+            model=response.model,
+            latency_ms=response.latency_ms,
+            input_tokens=response.usage.input_tokens if response.usage else None,
+            output_tokens=response.usage.output_tokens if response.usage else None,
+        )
+        if not response.structured_data:
+            raise ExtractionError(doc.file_id, "AI provider returned no structured classification")
+        return response.structured_data, ai_metadata
+
+    async def _classify_from_text_only(self, doc: DocumentMetadata) -> tuple[dict, AITraceMetadata]:
+        """Fallback: no stored content available — classify from filename/declared
+        type only. Not the path real uploads take; kept for robustness."""
+        request = build_document_classification_request(
+            file_name=doc.file_name,
+            declared_type=doc.declared_type,
+        )
+        response = await self.ai_provider.generate_structured(request)
+
+        ai_metadata = AITraceMetadata(
+            provider=response.provider,
+            model=response.model,
+            latency_ms=response.latency_ms,
+            input_tokens=response.usage.input_tokens if response.usage else None,
+            output_tokens=response.usage.output_tokens if response.usage else None,
+        )
+        return response.data, ai_metadata
 
     # ── Message Generation ────────────────────────────────────────────────────
 

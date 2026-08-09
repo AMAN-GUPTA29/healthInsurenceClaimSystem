@@ -50,6 +50,57 @@ function StatusBadge({ status }: { status: ClaimStatus }) {
   )
 }
 
+const PROCESSING_STATUS_LABEL: Record<string, string> = {
+  PENDING: '⟳ Processing…',
+  PROCESSED: '✓ Processed',
+  FAILED: '✕ Processing failed',
+}
+
+function DocumentCard({ doc }: { doc: ClaimResponse['documents'][number] }) {
+  return (
+    <div
+      data-testid="document-result-card"
+      style={{
+        background: 'rgba(15, 23, 42, 0.5)',
+        border: '1px solid rgba(51, 65, 85, 0.6)',
+        borderRadius: '10px',
+        padding: '14px 16px',
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+        <span style={{ fontSize: '13px', fontWeight: 600, color: '#e2e8f0' }}>
+          {doc.file_name ?? doc.file_id}
+        </span>
+        <span style={{ fontSize: '11px', color: '#64748b' }}>
+          {PROCESSING_STATUS_LABEL[doc.processing_status] ?? doc.processing_status}
+        </span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', fontSize: '12px' }}>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Type</div>
+          <div style={{ color: '#cbd5e1' }}>
+            {doc.document_type ? doc.document_type.replace(/_/g, ' ') : '—'}
+          </div>
+        </div>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Quality</div>
+          <div style={{ color: '#cbd5e1' }}>{doc.quality ? doc.quality.replace(/_/g, ' ') : '—'}</div>
+        </div>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Patient</div>
+          <div style={{ color: '#cbd5e1' }}>{doc.patient_name || '—'}</div>
+        </div>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Confidence</div>
+          <div style={{ color: '#cbd5e1' }}>
+            {doc.confidence != null ? doc.confidence.toFixed(2) : '—'}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function DocList({ title, items }: { title: string; items: string[] }) {
   if (items.length === 0) return null
   return (
@@ -125,7 +176,7 @@ export function ClaimDetail() {
             {claim.claim_id}
           </h1>
           <p style={{ margin: 0, color: '#64748b', fontSize: '13px' }}>
-            {claim.claim_category.replace('_', ' ')} · Member {claim.member_id} · ₹{claim.claimed_amount}
+            {claim.claim_category.replace(/_/g, ' ')} · Member {claim.member_id} · ₹{claim.claimed_amount}
           </p>
         </div>
         <StatusBadge status={claim.status} />
@@ -171,6 +222,17 @@ export function ClaimDetail() {
           <p style={{ margin: 0, color: '#bbf7d0', fontSize: '14px' }}>✓ {claim.user_message}</p>
         </div>
       )}
+
+      <div style={CARD}>
+        <h2 style={{ margin: '0 0 16px', fontSize: '15px', fontWeight: 600, color: '#e2e8f0' }}>
+          Documents
+        </h2>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {claim.documents.map(doc => (
+            <DocumentCard key={doc.file_id} doc={doc} />
+          ))}
+        </div>
+      </div>
 
       <div style={CARD}>
         <h2 style={{ margin: '0 0 16px', fontSize: '15px', fontWeight: 600, color: '#e2e8f0' }}>

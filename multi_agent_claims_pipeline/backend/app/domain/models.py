@@ -88,6 +88,14 @@ class DocumentQuality(str, Enum):
     UNKNOWN = "UNKNOWN"
 
 
+class DocumentProcessingStatus(str, Enum):
+    """Lifecycle status of a single uploaded document within a claim."""
+
+    PENDING = "PENDING"  # Uploaded/stored, not yet classified
+    PROCESSED = "PROCESSED"  # AI classification completed successfully
+    FAILED = "FAILED"  # AI classification attempted and failed
+
+
 class RejectionReason(str, Enum):
     """Structured rejection reason codes for use in decisions and explanations."""
 
@@ -143,16 +151,26 @@ class DocumentMetadata(BaseModel):
     """
     Metadata about an uploaded document file.
     Populated at submission time; content extraction happens later in the pipeline.
+
+    `declared_type` no longer comes from a UI dropdown (Phase 2A correction —
+    the member never selects a type; the AI-detected `detected_type` is the
+    only source of truth for verification). It's kept for cases where a
+    caller genuinely knows the type in advance (e.g. a future structured
+    import), but DocumentVerificationAgent never trusts it over an AI result.
     """
 
     file_id: str
     file_name: str
     mime_type: Optional[str] = None
     size_bytes: Optional[int] = None
-    declared_type: Optional[DocumentType] = None  # What the member says it is
-    detected_type: Optional[DocumentType] = None   # What the system identifies
+    declared_type: Optional[DocumentType] = None  # What the member says it is (rarely set)
+    detected_type: Optional[DocumentType] = None   # What the AI determined — source of truth
     quality: DocumentQuality = DocumentQuality.UNKNOWN
-    content_url: Optional[str] = None              # Presigned/storage URL
+    content_url: Optional[str] = None              # Presigned/public URL (future object storage)
+    storage_reference: Optional[str] = None         # DocumentStorage-internal reference — never exposed via the API
+    patient_name: Optional[str] = None              # AI-extracted, once classified
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    processing_status: DocumentProcessingStatus = DocumentProcessingStatus.PENDING
     uploaded_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -360,6 +378,15 @@ from app.domain.verification import (  # noqa: E402
 )
 
 
+def generate_claim_id() -> str:
+    """
+    Shared claim_id generator — used both as Claim's own default_factory
+    and by callers (e.g. the claims API) that need the ID *before*
+    constructing a Claim, such as to name a document's storage path.
+    """
+    return f"CLM-{uuid4().hex[:8].upper()}"
+
+
 class Claim(BaseModel):
     """
     Full claim record, enriched through pipeline processing.
@@ -372,7 +399,7 @@ class Claim(BaseModel):
     `document_verification_result` means "not reached yet", not "passed".
     """
 
-    claim_id: str = Field(default_factory=lambda: f"CLM-{uuid4().hex[:8].upper()}")
+    claim_id: str = Field(default_factory=lambda: generate_claim_id())
     submission: ClaimSubmission
     status: ClaimStatus = ClaimStatus.SUBMITTED
     documents: List[Document] = Field(default_factory=list)

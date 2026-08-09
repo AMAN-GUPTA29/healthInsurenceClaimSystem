@@ -18,6 +18,7 @@ from app.domain.models import (
     ClaimSubmission,
     Document,
     DocumentMetadata,
+    DocumentProcessingStatus,
     DocumentQuality,
     DocumentType,
 )
@@ -78,9 +79,15 @@ class ClaimRepository(BaseRepository[Claim, str]):
                         claim_id=claim.claim_id,
                         file_id=doc.metadata.file_id,
                         file_name=doc.metadata.file_name,
+                        mime_type=doc.metadata.mime_type,
+                        size_bytes=doc.metadata.size_bytes,
+                        storage_reference=doc.metadata.storage_reference,
                         declared_type=doc.metadata.declared_type.value if doc.metadata.declared_type else None,
                         detected_type=doc.metadata.detected_type.value if doc.metadata.detected_type else None,
                         quality=doc.metadata.quality.value,
+                        patient_name=doc.metadata.patient_name,
+                        confidence=doc.metadata.confidence,
+                        processing_status=doc.metadata.processing_status.value,
                     )
                 )
 
@@ -105,9 +112,15 @@ def _to_domain(row: ClaimORM, doc_rows: List[ClaimDocumentORM]) -> Claim:
             metadata=DocumentMetadata(
                 file_id=d.file_id,
                 file_name=d.file_name or d.file_id,
+                mime_type=d.mime_type,
+                size_bytes=d.size_bytes,
+                storage_reference=d.storage_reference,
                 declared_type=DocumentType(d.declared_type) if d.declared_type else None,
                 detected_type=DocumentType(d.detected_type) if d.detected_type else None,
                 quality=DocumentQuality(d.quality),
+                patient_name=d.patient_name,
+                confidence=d.confidence,
+                processing_status=DocumentProcessingStatus(d.processing_status),
             )
         )
         for d in doc_rows

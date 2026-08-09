@@ -127,6 +127,17 @@ class Settings(BaseSettings):
         description="Fraud score above which a claim is routed to MANUAL_REVIEW.",
     )
 
+    # ── Document Upload (Phase 2A correction) ───────────────────────────────────
+    upload_dir: str = Field(
+        default="data/uploads",
+        description="Local filesystem base directory for uploaded documents (LocalFileDocumentStorage).",
+    )
+    max_upload_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=1,
+        description="Maximum size, in bytes, accepted for a single uploaded document.",
+    )
+
     @field_validator("anthropic_api_key", mode="before")
     @classmethod
     def warn_missing_anthropic_key(cls, v: Optional[str]) -> Optional[str]:

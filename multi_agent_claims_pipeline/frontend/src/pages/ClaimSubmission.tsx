@@ -1,24 +1,17 @@
 /**
- * ClaimSubmission page — the first real claim submission experience.
+ * ClaimSubmission page — real document upload (Phase 2A correction).
  *
- * No file-upload/OCR pipeline exists yet (Phase 2A scope), so each
- * document row is entered manually: a simulated type, quality, and
- * patient name standing in for what real AI document classification
- * would produce. This is clearly labelled as such in the UI — it is not
- * presented as if it were real OCR. See backend
- * app/services/document_input_adapter.py for the same distinction on the
- * API side.
+ * The member never selects a document type — only the AI's read of the
+ * actual uploaded file determines that (see backend
+ * app/agents/document_verification_agent.py). This page's only job is to
+ * collect claim metadata and real PDF/JPEG/PNG files and submit them as
+ * multipart/form-data.
  */
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { claimsApi, APIClientError } from '../services/api'
-import type {
-  ClaimCategory,
-  ClaimDocumentInput,
-  DocumentQuality,
-  DocumentType,
-} from '../types'
+import type { ClaimCategory } from '../types'
 
 // ── Style Helpers (matches Dashboard.tsx's existing dark theme) ──────────────
 
@@ -60,98 +53,68 @@ const CATEGORIES: ClaimCategory[] = [
   'ALTERNATIVE_MEDICINE',
 ]
 
-const DOCUMENT_TYPES: DocumentType[] = [
-  'PRESCRIPTION',
-  'HOSPITAL_BILL',
-  'LAB_REPORT',
-  'DIAGNOSTIC_REPORT',
-  'PHARMACY_BILL',
-  'DISCHARGE_SUMMARY',
-  'DENTAL_REPORT',
-  'PRE_AUTH_LETTER',
-  'UNKNOWN',
-]
+const ACCEPTED_EXTENSIONS = '.pdf,.jpg,.jpeg,.png'
+const ACCEPTED_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png']
+const MAX_FILE_BYTES = 10 * 1024 * 1024 // 10 MB — matches backend MAX_UPLOAD_BYTES
 
-const QUALITIES: DocumentQuality[] = ['GOOD', 'LOW_QUALITY', 'PARTIAL', 'UNREADABLE', 'UNKNOWN']
-
-interface DocRow extends ClaimDocumentInput {
+interface SelectedFile {
   key: string
+  file: File
 }
 
-let rowKeySeq = 0
-function newRow(overrides: Partial<DocRow> = {}): DocRow {
-  rowKeySeq += 1
-  return {
-    key: `row-${rowKeySeq}`,
-    file_id: `F${String(rowKeySeq).padStart(3, '0')}`,
-    file_name: '',
-    actual_type: 'PRESCRIPTION',
-    quality: 'GOOD',
-    patient_name_on_doc: '',
-    ...overrides,
-  }
+let keySeq = 0
+function wrapFile(file: File): SelectedFile {
+  keySeq += 1
+  return { key: `file-${keySeq}-${file.name}`, file }
 }
 
-// ── Example Loaders (for demo / manual testing — see docs/AI_HANDOFF.md) ────
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+// ── Example metadata (for demo / manual TC001-3 reproduction with real files) ─
+//
+// Only claim metadata is pre-filled — matching TC001-3's member/category/
+// date/amount. The member must still attach real documents; there is no
+// "load fixture documents" concept left in the real-upload UI (see
+// docs/AI_HANDOFF.md for the Phase 2A correction rationale).
 
 const EXAMPLES = {
   TC001: {
-    label: 'TC001 — Wrong Document',
+    label: 'TC001 metadata — Wrong Document',
     member_id: 'EMP001',
     claim_category: 'CONSULTATION' as ClaimCategory,
     treatment_date: '2024-11-01',
-    claimed_amount: 1500,
-    documents: [
-      newRow({ file_name: 'dr_sharma_prescription.jpg', actual_type: 'PRESCRIPTION' }),
-      newRow({ file_name: 'another_prescription.jpg', actual_type: 'PRESCRIPTION' }),
-    ],
+    claimed_amount: '1500',
   },
   TC002: {
-    label: 'TC002 — Unreadable Document',
+    label: 'TC002 metadata — Unreadable Document',
     member_id: 'EMP004',
     claim_category: 'PHARMACY' as ClaimCategory,
     treatment_date: '2024-10-25',
-    claimed_amount: 800,
-    documents: [
-      newRow({ file_name: 'prescription.jpg', actual_type: 'PRESCRIPTION', quality: 'GOOD' }),
-      newRow({ file_name: 'blurry_bill.jpg', actual_type: 'PHARMACY_BILL', quality: 'UNREADABLE' }),
-    ],
+    claimed_amount: '800',
   },
   TC003: {
-    label: 'TC003 — Different Patients',
+    label: 'TC003 metadata — Different Patients',
     member_id: 'EMP001',
     claim_category: 'CONSULTATION' as ClaimCategory,
     treatment_date: '2024-11-01',
-    claimed_amount: 1500,
-    documents: [
-      newRow({ file_name: 'prescription_rajesh.jpg', actual_type: 'PRESCRIPTION', patient_name_on_doc: 'Rajesh Kumar' }),
-      newRow({ file_name: 'bill_arjun.jpg', actual_type: 'HOSPITAL_BILL', patient_name_on_doc: 'Arjun Mehta' }),
-    ],
-  },
-  CLEAN: {
-    label: 'Clean example — clears Phase 2A',
-    member_id: 'EMP001',
-    claim_category: 'CONSULTATION' as ClaimCategory,
-    treatment_date: '2024-11-01',
-    claimed_amount: 1500,
-    documents: [
-      newRow({ file_name: 'prescription.jpg', actual_type: 'PRESCRIPTION', patient_name_on_doc: 'Rajesh Kumar' }),
-      newRow({ file_name: 'hospital_bill.jpg', actual_type: 'HOSPITAL_BILL', patient_name_on_doc: 'Rajesh Kumar' }),
-    ],
+    claimed_amount: '1500',
   },
 } as const
 
 export function ClaimSubmission() {
   const navigate = useNavigate()
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [memberId, setMemberId] = useState('EMP001')
   const [policyId, setPolicyId] = useState('PLUM_GHI_2024')
   const [category, setCategory] = useState<ClaimCategory>('CONSULTATION')
   const [treatmentDate, setTreatmentDate] = useState('2024-11-01')
   const [claimedAmount, setClaimedAmount] = useState('1500')
-  const [documents, setDocuments] = useState<DocRow[]>([
-    newRow({ file_name: 'prescription.jpg' }),
-    newRow({ file_name: 'hospital_bill.jpg', actual_type: 'HOSPITAL_BILL' }),
-  ])
+  const [files, setFiles] = useState<SelectedFile[]>([])
+  const [fileError, setFileError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -160,38 +123,57 @@ export function ClaimSubmission() {
     setMemberId(ex.member_id)
     setCategory(ex.claim_category)
     setTreatmentDate(ex.treatment_date)
-    setClaimedAmount(String(ex.claimed_amount))
-    setDocuments(ex.documents.map(d => ({ ...d })))
+    setClaimedAmount(ex.claimed_amount)
   }
 
-  function updateDoc(key: string, patch: Partial<DocRow>) {
-    setDocuments(rows => rows.map(r => (r.key === key ? { ...r, ...patch } : r)))
+  function handleFilesSelected(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) return
+    setFileError(null)
+    const accepted: SelectedFile[] = []
+    for (const file of Array.from(fileList)) {
+      if (!ACCEPTED_MIME_TYPES.includes(file.type)) {
+        setFileError(`"${file.name}" is not a PDF, JPEG, or PNG file.`)
+        continue
+      }
+      if (file.size > MAX_FILE_BYTES) {
+        setFileError(`"${file.name}" is larger than 10 MB.`)
+        continue
+      }
+      if (file.size === 0) {
+        setFileError(`"${file.name}" is empty.`)
+        continue
+      }
+      accepted.push(wrapFile(file))
+    }
+    setFiles(prev => [...prev, ...accepted])
+    if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  function addDoc() {
-    setDocuments(rows => [...rows, newRow()])
-  }
-
-  function removeDoc(key: string) {
-    setDocuments(rows => rows.filter(r => r.key !== key))
+  function removeFile(key: string) {
+    setFiles(prev => prev.filter(f => f.key !== key))
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+
+    if (files.length === 0) {
+      setError('Please add at least one document before submitting.')
+      return
+    }
+
     setSubmitting(true)
     try {
-      const response = await claimsApi.submit({
-        member_id: memberId,
-        policy_id: policyId,
-        claim_category: category,
-        treatment_date: treatmentDate,
-        claimed_amount: Number(claimedAmount),
-        documents: documents.map(({ key, ...rest }) => ({
-          ...rest,
-          patient_name_on_doc: rest.patient_name_on_doc || undefined,
-        })),
-      })
+      const response = await claimsApi.submit(
+        {
+          member_id: memberId,
+          policy_id: policyId,
+          claim_category: category,
+          treatment_date: treatmentDate,
+          claimed_amount: Number(claimedAmount),
+        },
+        files.map(f => f.file)
+      )
       navigate(`/claims/${response.claim_id}`)
     } catch (err) {
       if (err instanceof APIClientError) {
@@ -211,8 +193,9 @@ export function ClaimSubmission() {
           Submit a Claim
         </h1>
         <p style={{ margin: 0, color: '#64748b', fontSize: '14px' }}>
-          Phase 2A: claim validation, document verification, and cross-document
-          validation. No policy decision is generated yet.
+          Upload real PDF, JPEG, or PNG documents. The AI determines each
+          document's type, quality, and patient identity from its actual
+          content — Phase 2A does not generate a policy decision yet.
         </p>
       </div>
 
@@ -296,7 +279,7 @@ export function ClaimSubmission() {
             </h2>
             <button
               type="button"
-              onClick={addDoc}
+              onClick={() => fileInputRef.current?.click()}
               style={{
                 background: 'rgba(34, 197, 94, 0.12)',
                 border: '1px solid rgba(34, 197, 94, 0.3)',
@@ -308,91 +291,89 @@ export function ClaimSubmission() {
                 cursor: 'pointer',
               }}
             >
-              + Add document
+              + Add Document
             </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={ACCEPTED_EXTENSIONS}
+              multiple
+              data-testid="file-input"
+              style={{ display: 'none' }}
+              onChange={e => handleFilesSelected(e.target.files)}
+            />
           </div>
           <p style={{ margin: '0 0 16px', fontSize: '12px', color: '#64748b' }}>
-            No file upload yet — each row simulates what AI document
-            classification would find (type, quality, patient name). A real
-            submission would only need a file; the backend calls the
-            configured AI provider to classify it.
+            PDF, JPG, JPEG, or PNG — up to 10 MB each. The AI reads the actual
+            document content to determine its type; you don't need to (and
+            can't) declare it yourself.
           </p>
 
-          {documents.map((doc, idx) => (
+          {files.length === 0 ? (
             <div
-              key={doc.key}
               style={{
-                background: 'rgba(15, 23, 42, 0.5)',
-                border: '1px solid rgba(51, 65, 85, 0.6)',
+                textAlign: 'center',
+                padding: '28px',
+                fontSize: '13px',
+                color: '#64748b',
+                border: '1px dashed rgba(51, 65, 85, 0.8)',
                 borderRadius: '10px',
-                padding: '14px',
-                marginBottom: '10px',
               }}
             >
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
-                <span style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>
-                  Document {idx + 1}
-                </span>
-                {documents.length > 1 && (
+              No documents added yet.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {files.map(({ key, file }) => (
+                <div
+                  key={key}
+                  data-testid="selected-file-row"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    background: 'rgba(15, 23, 42, 0.5)',
+                    border: '1px solid rgba(51, 65, 85, 0.6)',
+                    borderRadius: '10px',
+                    padding: '10px 14px',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+                    <span style={{ fontSize: '16px' }}>
+                      {file.type === 'application/pdf' ? '📄' : '🖼️'}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: '13px',
+                        color: '#e2e8f0',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {file.name}
+                    </span>
+                    <span style={{ fontSize: '12px', color: '#64748b', flexShrink: 0 }}>
+                      {formatFileSize(file.size)}
+                    </span>
+                    <span style={{ color: '#86efac', fontSize: '13px', flexShrink: 0 }}>✓</span>
+                  </div>
                   <button
                     type="button"
-                    onClick={() => removeDoc(doc.key)}
-                    style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: '12px' }}
+                    onClick={() => removeFile(key)}
+                    aria-label={`Remove ${file.name}`}
+                    style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: '12px', flexShrink: 0 }}
                   >
                     Remove
                   </button>
-                )}
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '10px' }}>
-                <div>
-                  <label style={LABEL}>File name</label>
-                  <input
-                    style={INPUT}
-                    value={doc.file_name ?? ''}
-                    onChange={e => updateDoc(doc.key, { file_name: e.target.value })}
-                    placeholder="prescription.jpg"
-                  />
                 </div>
-                <div>
-                  <label style={LABEL}>Simulated type</label>
-                  <select
-                    style={INPUT}
-                    value={doc.actual_type}
-                    onChange={e => updateDoc(doc.key, { actual_type: e.target.value as DocumentType })}
-                  >
-                    {DOCUMENT_TYPES.map(t => (
-                      <option key={t} value={t}>
-                        {t.replace(/_/g, ' ')}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label style={LABEL}>Quality</label>
-                  <select
-                    style={INPUT}
-                    value={doc.quality}
-                    onChange={e => updateDoc(doc.key, { quality: e.target.value as DocumentQuality })}
-                  >
-                    {QUALITIES.map(q => (
-                      <option key={q} value={q}>
-                        {q.replace(/_/g, ' ')}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label style={LABEL}>Patient name (optional)</label>
-                  <input
-                    style={INPUT}
-                    value={doc.patient_name_on_doc ?? ''}
-                    onChange={e => updateDoc(doc.key, { patient_name_on_doc: e.target.value })}
-                    placeholder="Rajesh Kumar"
-                  />
-                </div>
-              </div>
+              ))}
             </div>
-          ))}
+          )}
+
+          {fileError && (
+            <p style={{ margin: '10px 0 0', fontSize: '12px', color: '#fca5a5' }}>{fileError}</p>
+          )}
         </div>
 
         {error && (

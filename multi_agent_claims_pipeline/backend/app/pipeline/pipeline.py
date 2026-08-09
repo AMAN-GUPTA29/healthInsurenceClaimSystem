@@ -37,7 +37,7 @@ from typing import Any, Callable, Coroutine, Dict, Optional, TypeVar
 from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
-from app.domain.models import Claim, ClaimStatus
+from app.domain.models import Claim, ClaimStatus, DocumentProcessingStatus
 from app.domain.trace import TraceComponent
 from app.domain.verification import (
     CrossDocumentValidationStatus,
@@ -222,10 +222,15 @@ class ClaimsPipeline:
     def _apply_classifications(claim: Claim, classifications) -> None:
         """
         Write DocumentVerificationAgent's findings back onto claim.documents
-        (detected_type/quality) so the API response and persisted rows
-        reflect what was actually determined about each document — not
-        just what the member declared (which real submissions may not set
-        at all).
+        (detected_type/quality/patient_name/confidence) so the API response
+        and persisted rows reflect what was actually determined about each
+        document — not just what the member declared (a real upload never
+        declares a type at all; the AI's read of the actual file is the
+        only source of truth — see DocumentMetadata's docstring).
+
+        Documents with no matching classification (shouldn't normally
+        happen — every submitted document is either pre-classified or sent
+        to the AI) are left at their default PENDING processing_status.
         """
         by_file_id = {c.file_id: c for c in classifications}
         for doc in claim.documents:
@@ -233,6 +238,9 @@ class ClaimsPipeline:
             if classification is not None:
                 doc.metadata.detected_type = classification.document_type
                 doc.metadata.quality = classification.quality
+                doc.metadata.patient_name = classification.patient_name
+                doc.metadata.confidence = classification.confidence
+                doc.metadata.processing_status = DocumentProcessingStatus.PROCESSED
 
     async def _degrade(
         self,
@@ -251,6 +259,11 @@ class ClaimsPipeline:
         anything downstream and one PIPELINE-level FAILED event, then
         returns a claim an ops user can still look up and understand.
         """
+        if failed_component == TraceComponent.DOCUMENT_VERIFICATION:
+            for doc in claim.documents:
+                if doc.metadata.processing_status == DocumentProcessingStatus.PENDING:
+                    doc.metadata.processing_status = DocumentProcessingStatus.FAILED
+
         for component in remaining:
             await tracer.skipped(
                 component, f"Skipped — {failed_component.value} failed with a technical error"

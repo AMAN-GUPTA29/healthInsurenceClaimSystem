@@ -16,9 +16,23 @@ The system evaluates OPD health insurance claims using a multi-agent AI pipeline
 
 ## Current Phase
 
-**Phase 2A — Claim Foundation & Early Document Verification** ✅ COMPLETE
+**Phase 2A — Claim Foundation & Early Document Verification** ✅ COMPLETE,
+**including the Real Document Upload correction** ✅ COMPLETE
 (Phase 0 — Foundation & Architecture ✅ COMPLETE, Phase 1 — Observability &
 Trace Infrastructure ✅ COMPLETE, history preserved below)
+
+> **Phase 2A required a correction after its first pass**: the initial
+> implementation's UI only let a member *select a document type* from a
+> dropdown — it never accepted an actual file. That does not satisfy the
+> assignment ("the application MUST support real PDF/JPG/PNG document
+> uploads"), and it meant `DocumentVerificationAgent` was classifying
+> documents from a user-declared type/filename, not from real content. The
+> correction (this section) replaced the dropdown with a real file-upload
+> UI, added a `DocumentStorage` abstraction, switched `POST /api/v1/claims`
+> to `multipart/form-data`, and made `DocumentVerificationAgent` classify
+> from actual uploaded bytes via `AIProvider.analyze_document()`
+> (multimodal), never from filename or user selection. See "Real Document
+> Upload Correction" below for the full account.
 
 ---
 
@@ -52,13 +66,23 @@ Trace Infrastructure ✅ COMPLETE, history preserved below)
 - `app/policy/policy_repository.py` — `PolicyRepository`: read-only access to `policy_terms.json` (members, document requirements, minimum claim amount) — **not** a decision engine
 - `app/domain/verification.py` — `ValidationResult`, `DocumentVerificationResult`, `CrossDocumentValidationResult`, `DocumentClassification` and their status enums
 - `app/agents/claim_validation_agent.py`, `document_verification_agent.py`, `cross_document_validation_agent.py` — the three Phase 2A pipeline stages
-- `app/ai/prompts/document_verification.py` — the one real AI call this phase makes (document classification)
-- `app/services/document_input_adapter.py` — the shared real-submission/evaluation-fixture input boundary
+- `app/ai/prompts/document_verification.py` — `build_document_analysis_request()` (real multimodal classification from uploaded bytes, primary path) and `build_document_classification_request()` (text-only fallback, evaluation fixtures / documents with no stored bytes)
+- `app/storage/document_storage.py` — `DocumentStorage` ABC + `LocalFileDocumentStorage` (real-upload correction; see below)
+- `app/services/document_input_adapter.py` — the shared real-submission/evaluation-fixture input boundary: `to_domain()` (fixtures) and `from_uploads()` (real `UploadFile`s)
 - `app/pipeline/pipeline.py` — `ClaimsPipeline`: orchestrates the three stages, early-stops, degrades gracefully on AI/infra failure, never raises
 - `app/repositories/claim_models.py` + `claim_repository.py` — SQLAlchemy persistence (`claims`, `claim_documents` tables) behind `ClaimRepository`
-- `app/api/v1/claims.py` — `POST /api/v1/claims`, `GET /api/v1/claims/{claim_id}`
+- `app/api/v1/claims.py` — `POST /api/v1/claims` (multipart/form-data), `GET /api/v1/claims/{claim_id}`
 - `app/evaluation/runner.py` + `scripts/run_eval.py` — runs TC001-TC003 through the real pipeline and reports PASS/FAIL
-- Full contracts in `docs/component-contracts.md`; design rationale in `docs/architecture.md`'s "Claim Processing Flow (Phase 2A)" section
+- Full contracts in `docs/component-contracts.md`; design rationale in `docs/architecture.md`'s "Claim Processing Flow (Phase 2A)" and "Real Document Upload" sections
+
+### Real Document Upload Correction (Phase 2A, post-hoc fix)
+- `app/storage/document_storage.py` — `DocumentStorage` ABC (`save`/`read`/`delete`), `LocalFileDocumentStorage` (filesystem now, S3-swappable later), `validate_upload()` (magic-byte signature check + size/MIME/extension validation), `generate_storage_filename()` (UUID, never the client's filename)
+- `app/api/v1/claims.py` — rewritten from a JSON body to `Form(...)`/`File(...)` multipart handling; files are read once, validated, handed to `DocumentStorage`, then to `DocumentInputAdapter.from_uploads()`
+- `app/agents/document_verification_agent.py` — branches on whether a document has a `storage_reference`: real bytes → `AIProvider.analyze_document()` (multimodal); no bytes (fixtures) → `AIProvider.generate_structured()` (text-only, documented fallback)
+- Frontend `ClaimSubmission.tsx` — real `<input type="file" accept=".pdf,.jpg,.jpeg,.png" multiple>` behind an "+ Add Document" button; shows filename/size/checkmark per file with a Remove control; no document-type selector anywhere
+- Frontend `ClaimDetail.tsx` — new `DocumentCard`/"Documents" section shows the AI-determined Type/Quality/Patient/Confidence per document, sourced entirely from the API response
+- `storage_reference` (the filesystem-relative path) is on the domain model and ORM but deliberately excluded from `ClaimDocumentSummary` (API schema) — never exposed over HTTP
+- Verified end-to-end with real Gemini calls on real uploaded synthetic images (not just fixtures) — see "Real Document Upload Verification" below
 
 ---
 
@@ -103,6 +127,9 @@ Trace Infrastructure ✅ COMPLETE, history preserved below)
 | Claims API (`POST`/`GET /claims`) | `app/api/v1/claims.py`, `schemas.py` | ✅ |
 | Evaluation runner (TC001-TC003) | `app/evaluation/runner.py`, `scripts/run_eval.py` | ✅ |
 | Source-file path resolution | `app/config/paths.py` | ✅ |
+| DocumentStorage ABC + LocalFileDocumentStorage | `app/storage/document_storage.py` | ✅ |
+| Multipart claims API (real file upload) | `app/api/v1/claims.py` | ✅ |
+| Real multimodal document classification | `app/agents/document_verification_agent.py` (`_classify_from_content`) | ✅ |
 
 ### Frontend
 
@@ -116,8 +143,8 @@ Trace Infrastructure ✅ COMPLETE, history preserved below)
 | Vite config | `vite.config.ts` | ✅ |
 | TraceViewer component (reusable) | `src/components/TraceViewer.tsx` | ✅ |
 | useClaimTrace hook | `src/hooks/useClaimTrace.ts` | ✅ |
-| ClaimSubmission page | `src/pages/ClaimSubmission.tsx` | ✅ |
-| ClaimDetail page (mounts TraceViewer) | `src/pages/ClaimDetail.tsx` | ✅ |
+| ClaimSubmission page (real file upload UI) | `src/pages/ClaimSubmission.tsx` | ✅ |
+| ClaimDetail page (mounts TraceViewer, document results) | `src/pages/ClaimDetail.tsx` | ✅ |
 
 `TraceViewer`/`useClaimTrace` (built in Phase 1) are now mounted for the
 first time, in `ClaimDetail.tsx` — unmodified except a display bug fixed
@@ -144,8 +171,13 @@ in passing (`MetadataChips` rendered object-valued metadata, e.g.
 | DocumentInputAdapter | `tests/unit/test_document_input_adapter.py` | ✅ |
 | Verification domain models | `tests/unit/test_verification_domain.py` | ✅ |
 | ClaimsPipeline (early-stop, full pass, graceful degradation on AI failure) | `tests/integration/test_claims_pipeline.py` | ✅ |
-| Claims API (submit/get/404/trace linkage) | `tests/integration/test_claims_api.py` | ✅ |
+| Claims API — multipart upload, validation, storage wiring | `tests/integration/test_claims_api.py` | ✅ (16 tests) |
 | TC001-TC003 via the real evaluation runner | `tests/integration/test_eval_tc001_tc003.py` | ✅ |
+| DocumentStorage (magic-byte validation, path safety, save/read/delete) | `tests/unit/test_document_storage.py` | ✅ (18 tests) |
+| DocumentInputAdapter — `from_uploads()` real-upload path | `tests/unit/test_document_input_adapter.py` (`TestFromUploads`) | ✅ |
+| DocumentVerificationAgent — real-content classification path | `tests/unit/test_document_verification_agent.py` (`TestRealContentClassificationPath`) | ✅ |
+| ClaimSubmission — real file picker, multi-file, remove, validation, submit | `frontend/src/pages/ClaimSubmission.test.tsx` | ✅ (11 tests) |
+| ClaimDetail — AI-determined document results render, storage_reference never leaks | `frontend/src/pages/ClaimDetail.test.tsx` | ✅ (3 tests) |
 
 ---
 
@@ -213,6 +245,15 @@ Discovered live once a real API key was added: `gemini-2.5-flash` (the Phase 2A 
 
 ### Decision 21: `AITraceMetadata` capture required a dedicated `ai_calls` field and an `ai_metadata_fn` hook — it wasn't automatic
 Before Decision 21, `AITraceMetadata` existed in the trace schema (Phase 1) but nothing populated it on a successful `DocumentVerificationAgent` classification — the only failure path (an exception) got safe error info, but a success just returned a `DocumentVerificationResult` with no AI-call record attached. Fixed by adding `DocumentVerificationResult.ai_calls: List[AITraceMetadata]` (one entry per real classification call — empty when every document was pre-classified) and a new `ai_metadata_fn` parameter on `ClaimsPipeline._run_stage`, wired only for the `DOCUMENT_VERIFICATION` stage. Verified against a real successful call — see "Real AI Verification" above.
+
+### Decision 22: `DocumentStorage` is an ABC injected into the pipeline, never imported by an agent directly
+Mirrors the `AIProvider`/`TraceService` dependency-injection discipline already established (Decisions 1, 10). `DocumentStorage.save()`/`read()`/`delete()` is the entire surface; `LocalFileDocumentStorage` is the only implementation today, but nothing above the ABC knows that. `app/api/v1/claims.py` reads each `UploadFile` once, calls `document_storage.save(...)`, and passes the resulting `storage_reference` into `DocumentInputAdapter.from_uploads()` — `DocumentVerificationAgent` receives a `storage_reference` string and calls `document_storage.read(storage_reference)` when it needs the real bytes for `analyze_document()`, never touching a filesystem path directly. Swapping to S3 later means writing one new class, not touching the pipeline or agents.
+
+### Decision 23: Generated UUID filenames, never the client's original filename, as the storage path
+`generate_storage_filename()` produces `{uuid4}.{validated_extension}` — the original filename (`file_name` in the domain model, shown to the user) is stored separately from `storage_reference` (the actual disk path, never exposed over the API). This closes two real risks at once: path traversal (a filename like `../../etc/passwd` never reaches the filesystem layer) and filename collisions (two members uploading a file both named `prescription.jpg` on the same claim). `LocalFileDocumentStorage._resolve()` additionally does a `Path.resolve()` + containment check as defense-in-depth even though the filename is already server-generated.
+
+### Decision 24: Real classification branches on `storage_reference` presence, not a feature flag
+`DocumentVerificationAgent._classify_via_ai()` checks `if document.storage_reference:` to decide between `_classify_from_content()` (reads real bytes, calls `AIProvider.analyze_document()`) and `_classify_from_text_only()` (calls `AIProvider.generate_structured()` with just the declared/actual type as a hint). This isn't a config toggle — it's structural: a real upload always has a `storage_reference` (set by `DocumentStorage.save()` in the API layer before the pipeline ever runs), and an evaluation fixture never does (fixtures skip storage entirely, per Decision 17's "one boundary" design). The agent doesn't need to know which one it's looking at; the data shape tells it.
 
 ---
 
@@ -285,6 +326,9 @@ multi_agent_claims_pipeline/
 │   │   ├── services/
 │   │   │   ├── __init__.py
 │   │   │   └── document_input_adapter.py
+│   │   ├── storage/
+│   │   │   ├── __init__.py
+│   │   │   └── document_storage.py     ← DocumentStorage ABC + LocalFileDocumentStorage
 │   │   └── tracing/
 │   │       ├── __init__.py
 │   │       ├── logging.py
@@ -304,6 +348,7 @@ multi_agent_claims_pipeline/
 │   │   │   ├── test_document_verification_agent.py
 │   │   │   ├── test_cross_document_validation_agent.py
 │   │   │   ├── test_document_input_adapter.py
+│   │   │   ├── test_document_storage.py
 │   │   │   └── test_verification_domain.py
 │   │   └── integration/
 │   │       ├── __init__.py
@@ -311,7 +356,7 @@ multi_agent_claims_pipeline/
 │   │       ├── test_trace_persistence.py
 │   │       ├── test_trace_api.py
 │   │       ├── test_claims_pipeline.py
-│   │       ├── test_claims_api.py
+│   │       ├── test_claims_api.py         ← rewritten for multipart uploads
 │   │       └── test_eval_tc001_tc003.py
 │   ├── pyproject.toml
 │   ├── requirements.txt
@@ -329,7 +374,9 @@ multi_agent_claims_pipeline/
 │   │   ├── components/TraceViewer.test.tsx
 │   │   ├── pages/Dashboard.tsx
 │   │   ├── pages/ClaimSubmission.tsx
-│   │   └── pages/ClaimDetail.tsx
+│   │   ├── pages/ClaimSubmission.test.tsx
+│   │   ├── pages/ClaimDetail.tsx
+│   │   └── pages/ClaimDetail.test.tsx
 │   ├── index.html
 │   ├── package.json
 │   ├── vite.config.ts
@@ -394,17 +441,19 @@ python ../scripts/run_eval.py            # all three
 python ../scripts/run_eval.py TC001      # a single case
 ```
 
-**All tests pass** (217 backend: 176 unit + 41 integration; 16 frontend component tests).
+**All tests pass** (253 backend: 212 unit + 41 integration; 30 frontend component tests).
 
-Verified end-to-end on 2026-08-09 (Phase 2A): `pytest` (217/217 passing), `vitest run`
-(16/16 passing), `npm run build` (TypeScript compiles clean), `scripts/run_eval.py`
-(TC001/TC002/TC003 all PASS through the real `ClaimsPipeline`), live `uvicorn` +
-`POST /api/v1/claims` + `GET /api/v1/claims/{id}` + `GET /api/v1/claims/{id}/trace`
-all exercised over real HTTP for TC001 with correct results, and the full
-submission → detail-page → live-trace flow driven end-to-end in a real browser
-for TC001, TC002, TC003, and a clean pass-through case (screenshots not saved,
-but console/network verified clean each time — see "Real AI Verification" below
-for the one console bug found and fixed).
+Verified end-to-end on 2026-08-09 (Phase 2A + Real Document Upload correction):
+`pytest` (253/253 passing), `vitest run` (30/30 passing), `npm run build`
+(TypeScript compiles clean), `scripts/run_eval.py` (TC001/TC002/TC003 all PASS
+through the real `ClaimsPipeline` using fixtures), live `uvicorn` +
+`POST /api/v1/claims` (multipart) + `GET /api/v1/claims/{id}` +
+`GET /api/v1/claims/{id}/trace` all exercised over real HTTP for TC001/TC002/TC003
+using **actual uploaded synthetic JPG files** (not fixtures) processed by the real
+Gemini API, and the full submission → detail-page → live-trace flow driven
+end-to-end in a real browser for TC003 (real file selection via the file input,
+real multipart submit, real classification and cross-document-mismatch result
+rendered) — see "Real Document Upload Verification" below.
 
 Also verified: a direct `sqlite3` query against `data/claims.db` confirming
 `claims` and `claim_documents` are populated correctly after a live submission.
@@ -473,6 +522,56 @@ no pre-supplied classification. Confirmed via the live `GET
 
 **Nothing outstanding** — all five of section 45's checklist items are now
 verified against a real, successful call.
+
+---
+
+## Real Document Upload Verification (correction, 2026-08-09)
+
+The "Real AI Verification" round above (Phase 2A's first pass) exercised the
+AI-classification *code path* but with `declared_type`/no real bytes — it
+proved the AI provider integration worked, not that a real uploaded file
+flowed through it. After the correction, TC001/TC002/TC003 were re-run
+against the live server using **actual synthetic JPG images** (generated
+with Pillow — real prescription/bill-style text rendered onto real JPEG
+files, including a genuinely blurred one for TC002), submitted as real
+`multipart/form-data` uploads:
+
+1. **TC001 (wrong document type)** — two real prescription-image JPGs
+   uploaded. Gemini correctly classified both as `PRESCRIPTION` from actual
+   image content (`confidence: 0.98` each), pipeline stopped at
+   `DOCUMENT_VERIFICATION` with `status=BLOCKED` and a message naming both
+   the uploaded type and the missing required type.
+2. **TC002 (unreadable document)** — one clear prescription JPG + one
+   deliberately blurred bill JPG (downscaled 20x then upscaled, genuinely
+   unreadable, not a flag). Gemini classified the good one as `PRESCRIPTION`
+   / `GOOD` and the blurry one as `UNKNOWN` / `UNREADABLE`
+   (`confidence: 0.1`); claim came back `status=DOCUMENTS_PENDING` (not
+   rejected), asking for re-upload.
+3. **TC003 (different patients)** — a prescription JPG rendered with
+   "Patient: Rajesh Kumar" and a bill JPG rendered with "Patient: Arjun
+   Mehta". Gemini extracted both names correctly from the image content
+   (`confidence: 0.98` each); `CrossDocumentValidationAgent` correctly
+   flagged the mismatch, citing both actual extracted names in the message.
+   Reproduced twice: once via direct HTTP multipart, once by driving the
+   **actual React UI in a browser** — selected both real files through the
+   file input, clicked Submit, and watched the real classification (Type /
+   Quality / Patient / Confidence per document) and the cross-document
+   mismatch render on the claim detail page, with the full trace timeline
+   showing real `ai_calls_made`/`latency_ms` values and no raw file bytes,
+   base64 data, or the API key anywhere in the trace or logs.
+
+Also confirmed directly: the uploaded files are persisted to
+`data/uploads/{claim_id}/{uuid}.{ext}` under generated UUID filenames (never
+the client's original filename), and `storage_reference` never appears in
+any API response (checked programmatically against all three responses).
+
+The stale pre-correction `data/claims.db` (missing the new document
+columns) caused one `sqlite3.OperationalError` during this verification —
+expected, since Phase 2A's SQLite setup has no migration story yet
+(`Base.metadata.create_all` only creates missing tables, it doesn't alter
+existing ones). Fixed by deleting the gitignored dev database so it
+regenerated with the current schema; not a code bug, and noted here in case
+a future agent hits the same thing after a domain-model column change.
 
 ---
 
@@ -545,6 +644,28 @@ verified against a real, successful call.
     2-document claim in live testing) — `DocumentVerificationAgent` classifies
     documents one at a time, not concurrently. Fine for Phase 2A single-claim
     testing; worth parallelizing (`asyncio.gather`) before real submission volume.
+
+12. **Real multimodal classification is slower still — ~20-40s per document**
+    (vs. ~5s for the text-only fallback), since Gemini is now actually reading
+    image bytes rather than a filename/declared-type hint. A 2-document TC001
+    submission took ~60s end-to-end in live testing. Acceptable for Phase 2A;
+    worth surfacing upload progress in the UI (currently just a "Submitting…"
+    label) if this becomes a real-usage complaint.
+
+13. **No SQLite migration story** — `Base.metadata.create_all()` (run at
+    startup) only creates tables that don't exist yet; it never alters an
+    existing table's columns. Any future domain-model column change requires
+    manually deleting the gitignored dev `data/claims.db` (or adding real
+    migrations, e.g. Alembic) before the new schema takes effect locally. Hit
+    and resolved during the Real Document Upload correction — see "Real
+    Document Upload Verification" above.
+
+14. **`DocumentStorage` is local-filesystem-only** — `LocalFileDocumentStorage`
+    is the only implementation; the `DocumentStorage` ABC is deliberately
+    designed to be S3-swappable later (see Decision 22), but no S3 adapter
+    exists yet. Fine for local dev/single-instance deployment; required before
+    any horizontally-scaled or ephemeral-filesystem deployment (e.g. most PaaS
+    containers).
 
 ### Resolved this session
 - ~~Node.js not installed~~ — installed; `npm install` and `npm run build` verified working.
@@ -654,7 +775,7 @@ Implement policy evaluation and the final decision, using
 `ClaimsPipeline` from Phase 2A as the foundation everything else builds on top of.
 
 ### Components to Build
-1. `DocumentExtractionAgent` — full structured data extraction beyond the classification `DocumentVerificationAgent` already does (diagnosis, line items, amounts, dates, doctor details) — likely the natural place to also add real multimodal/file-upload document understanding
+1. `DocumentExtractionAgent` — full structured data extraction beyond the classification `DocumentVerificationAgent` already does (diagnosis, line items, amounts, dates, doctor details) — builds on the real multimodal upload path added in the Phase 2A correction (see "Real Document Upload Correction" above); no further upload plumbing needed, just richer prompts/schemas over the same uploaded bytes
 2. `PolicyEngine` (fill in the existing stub in `app/policy/policy_engine.py`, built on top of `PolicyRepository`) — deterministic coverage, sub-limits, co-pay, network discount, waiting periods, exclusions, pre-authorization, all from `policy_terms.json`
 3. `FraudAnalysisAgent` — same-day claim patterns, high-value flags, monthly claim limits (thresholds already defined in `policy_terms.json`'s `fraud_thresholds`)
 4. `FinancialCalculationService` — copay, network discount, limits (Decimal arithmetic, no LLM); TC010 specifically tests discount-before-copay ordering
@@ -666,9 +787,9 @@ Implement policy evaluation and the final decision, using
 
 ### Also required for Phase 2B/3
 - ORM model for `decisions` (or extend `claims` — TBD when the shape is known)
-- Real file upload + multimodal AI classification (the `hint_text` extension point in `app/ai/prompts/document_verification.py` is designed for this)
-- Run all 12 test cases (not just TC001-TC003) against the real Gemini API; write `docs/eval-report.md`
-- A real `GEMINI_API_KEY` to close out the "Real AI Verification" outstanding item above
+- Run all 12 test cases (not just TC001-TC003) against the real Gemini API using real uploaded documents; write `docs/eval-report.md`
+- Consider Alembic (or similar) migrations before further domain-model column changes — see Known Issue 13
+- An S3 (or equivalent) `DocumentStorage` implementation before any horizontally-scaled deployment — see Known Issue 14
 - Update this document
 
 ---

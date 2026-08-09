@@ -6,21 +6,30 @@ have a pre-supplied classification (i.e. real submissions — see
 DocumentInputAdapter). Kept separate from the agent so the prompt is
 versionable and editable without touching orchestration code.
 
-Current scope (Phase 2A): no file upload/OCR pipeline exists yet, so this
-builds a *text-only* classification request from the filename and any
-member-declared type — a provisional stand-in for real multimodal
-classification. When file upload lands, this same function's `hint_text`
-parameter is where extracted OCR text or an inline image part would be
-added; the schema and downstream parsing do not need to change.
+Two request builders, for the two ways a document reaches this stage:
+- `build_document_analysis_request` — the real path (Phase 2A correction):
+  the actual uploaded file bytes (PDF/JPEG/PNG), sent through the
+  provider's native multimodal document-analysis capability
+  (`AIProvider.analyze_document`). This is what real uploads use.
+- `build_document_classification_request` — a text-only fallback (filename
+  + declared type only, via `AIProvider.generate_structured`) for a
+  document with no bytes available. Kept for callers that only have
+  metadata, not file content — DocumentVerificationAgent only falls back
+  to this if a document has no `storage_reference`.
 """
 
 from __future__ import annotations
 
+import base64
 from typing import Optional
 
 from app.ai.schemas.ai_schemas import (
     AIStructuredRequest,
     ContentRole,
+    DocumentAnalysisRequest,
+    DocumentContent,
+    ImageContent,
+    MediaType,
     Message,
     TextContent,
 )
@@ -74,6 +83,46 @@ DOCUMENT_CLASSIFICATION_SCHEMA = {
 }
 
 
+def build_document_analysis_request(
+    *,
+    file_name: Optional[str],
+    content: bytes,
+    media_type: MediaType,
+) -> DocumentAnalysisRequest:
+    """
+    Build the real multimodal document-analysis request — the actual file
+    bytes, sent through the provider's native document/vision capability.
+    This is the primary path for real uploads (Phase 2A correction): the
+    AI looks at the real document, not just its filename.
+
+    `file_name` is passed only as supplementary context in the prompt text
+    (a hint the model may use, e.g. "prescription_2.jpg" suggesting a
+    prescription) — never as the basis for classification on its own. The
+    document content is what actually gets classified.
+    """
+    data = base64.b64encode(content).decode("ascii")
+    if media_type == MediaType.PDF:
+        doc_content = DocumentContent(media_type=media_type, data=data, filename=file_name)
+    else:
+        doc_content = ImageContent(media_type=media_type, data=data)
+
+    prompt = (
+        "Classify this insurance claim document. "
+        f"File name (a hint only, not proof of type): {file_name or '(not provided)'}. "
+        "Look at the actual document content to determine its type, quality, and patient name — "
+        "do not rely on the filename alone."
+    )
+
+    return DocumentAnalysisRequest(
+        documents=[doc_content],
+        prompt=prompt,
+        system_prompt=DOCUMENT_CLASSIFICATION_SYSTEM_PROMPT,
+        output_schema=DOCUMENT_CLASSIFICATION_SCHEMA,
+        file_ids=[file_name] if file_name else [],
+        metadata={"prompt_version": "2a-correction.1"},
+    )
+
+
 def build_document_classification_request(
     *,
     file_name: Optional[str],
@@ -81,13 +130,15 @@ def build_document_classification_request(
     hint_text: Optional[str] = None,
 ) -> AIStructuredRequest:
     """
-    Build the structured-generation request for classifying one document.
+    Text-only fallback classification request (filename + declared type,
+    no document bytes). Used only when a document has no stored content to
+    analyze — real uploads always go through `build_document_analysis_request`
+    instead. Kept for robustness, not as the primary path.
 
     Args:
         file_name: The uploaded file's name, if known.
         declared_type: What the member said this document is, if provided.
-        hint_text: Any additional extracted text/context to classify from
-            (OCR text, image description, etc. — not used yet in Phase 2A).
+        hint_text: Any additional extracted text/context to classify from.
     """
     lines = ["Classify this insurance claim document."]
     lines.append(f"File name: {file_name or '(not provided)'}")

@@ -196,23 +196,16 @@ export interface CrossDocumentValidationResult {
   confidence?: number
 }
 
-// ── Claim submission request ──────────────────────────────────────────────────
+// ── Claim submission (Phase 2A correction: real file upload) ────────────────
 //
-// A real submission only sets file_id/file_name/declared_type. The
-// actual_type/quality/patient_name_on_doc fields exist so the evaluation
-// layer can pass fixture ground truth through this same shape — see
-// backend app/services/document_input_adapter.py.
+// POST /api/v1/claims is multipart/form-data — claim metadata as form
+// fields, real PDF/JPEG/PNG files under the "documents" field. There is no
+// JSON request type to mirror here; see services/api.ts's claimsApi.submit,
+// which builds the FormData directly. (The JSON-bodied ClaimSubmissionRequest
+// shape still exists backend-side, for the evaluation/fixture path only —
+// app/services/document_input_adapter.py — but the frontend never uses it.)
 
-export interface ClaimDocumentInput {
-  file_id: string
-  file_name?: string
-  declared_type?: DocumentType
-  actual_type?: DocumentType
-  quality?: DocumentQuality
-  patient_name_on_doc?: string
-}
-
-export interface ClaimSubmissionRequest {
+export interface ClaimSubmissionFields {
   member_id: string
   policy_id: string
   claim_category: ClaimCategory
@@ -220,15 +213,20 @@ export interface ClaimSubmissionRequest {
   claimed_amount: number
   hospital_name?: string
   ytd_claims_amount?: number
-  documents: ClaimDocumentInput[]
-  simulate_component_failure?: boolean
 }
+
+export type DocumentProcessingStatus = 'PENDING' | 'PROCESSED' | 'FAILED'
 
 export interface ClaimDocumentSummary {
   file_id: string
   file_name?: string
+  mime_type?: string
+  size_bytes?: number
   document_type?: DocumentType
   quality?: DocumentQuality
+  patient_name?: string
+  confidence?: number
+  processing_status: DocumentProcessingStatus
 }
 
 export interface ClaimResponse {

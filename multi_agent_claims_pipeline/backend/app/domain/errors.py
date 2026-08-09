@@ -164,6 +164,40 @@ class ExtractionError(DocumentError):
         )
 
 
+class UnsupportedDocumentTypeError(DocumentError):
+    """Raised when an uploaded file's content type/extension isn't allowed."""
+
+    def __init__(self, filename: str, content_type: Optional[str]) -> None:
+        super().__init__(
+            f"'{filename}' has an unsupported file type ({content_type or 'unknown'}). "
+            "Only PDF, JPEG, and PNG are accepted.",
+            code="UNSUPPORTED_DOCUMENT_TYPE",
+        )
+        self.details.update({"filename": filename, "content_type": content_type})
+
+
+class EmptyDocumentError(DocumentError):
+    """Raised when an uploaded file has no content, or no files were uploaded."""
+
+    def __init__(self, filename: Optional[str] = None) -> None:
+        message = f"'{filename}' is empty." if filename else "No documents were uploaded."
+        super().__init__(message, code="EMPTY_DOCUMENT")
+        if filename:
+            self.details["filename"] = filename
+
+
+class DocumentTooLargeError(DocumentError):
+    """Raised when an uploaded file exceeds the configured size limit."""
+
+    def __init__(self, filename: str, size_bytes: int, max_bytes: int) -> None:
+        super().__init__(
+            f"'{filename}' is {size_bytes / 1_000_000:.1f} MB, which exceeds the "
+            f"{max_bytes / 1_000_000:.0f} MB upload limit.",
+            code="DOCUMENT_TOO_LARGE",
+        )
+        self.details.update({"filename": filename, "size_bytes": size_bytes, "max_bytes": max_bytes})
+
+
 # ── AI / Provider Errors ──────────────────────────────────────────────────────
 
 

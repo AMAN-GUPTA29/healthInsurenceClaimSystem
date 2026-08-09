@@ -13,7 +13,7 @@
 import type {
   APIError,
   ClaimResponse,
-  ClaimSubmissionRequest,
+  ClaimSubmissionFields,
   ClaimTraceResponse,
   HealthResponse,
 } from '../types'
@@ -48,6 +48,22 @@ async function request<T>(
     ...options,
   })
 
+  return handleResponse<T>(response)
+}
+
+/**
+ * For multipart/form-data submissions (real file uploads). Deliberately
+ * does NOT set a Content-Type header — the browser must set it itself
+ * (including the multipart boundary), which it can only do when it
+ * controls the request body directly.
+ */
+async function requestMultipart<T>(path: string, formData: FormData): Promise<T> {
+  const url = `${API_BASE_URL}${path}`
+  const response = await fetch(url, { method: 'POST', body: formData })
+  return handleResponse<T>(response)
+}
+
+async function handleResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     let errorBody: APIError
     try {
@@ -85,11 +101,29 @@ export const traceApi = {
 // with status "PROCESSING" and no decision yet.
 
 export const claimsApi = {
-  submit: (submission: ClaimSubmissionRequest): Promise<ClaimResponse> =>
-    request<ClaimResponse>('/api/v1/claims', {
-      method: 'POST',
-      body: JSON.stringify(submission),
-    }),
+  /**
+   * Submits claim metadata + real uploaded files as multipart/form-data —
+   * matching the backend's POST /api/v1/claims contract exactly (see
+   * backend app/api/v1/claims.py). `files` must be real File objects from
+   * a file input; there is no document-type field to set here — the AI
+   * determines each document's type from its actual content.
+   */
+  submit: (fields: ClaimSubmissionFields, files: File[]): Promise<ClaimResponse> => {
+    const formData = new FormData()
+    formData.append('member_id', fields.member_id)
+    formData.append('policy_id', fields.policy_id)
+    formData.append('claim_category', fields.claim_category)
+    formData.append('treatment_date', fields.treatment_date)
+    formData.append('claimed_amount', String(fields.claimed_amount))
+    if (fields.hospital_name) formData.append('hospital_name', fields.hospital_name)
+    if (fields.ytd_claims_amount !== undefined) {
+      formData.append('ytd_claims_amount', String(fields.ytd_claims_amount))
+    }
+    for (const file of files) {
+      formData.append('documents', file, file.name)
+    }
+    return requestMultipart<ClaimResponse>('/api/v1/claims', formData)
+  },
   get: (claimId: string): Promise<ClaimResponse> =>
     request<ClaimResponse>(`/api/v1/claims/${encodeURIComponent(claimId)}`),
 }

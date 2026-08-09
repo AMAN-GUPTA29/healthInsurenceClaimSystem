@@ -366,8 +366,8 @@ Submission-deadline checking (`LATE_SUBMISSION`) is not implemented — see Deci
 | Purpose | Determine what document types were submitted, what's required (from `PolicyRepository`), what's missing/wrong/unreadable, and whether processing can continue. |
 | Input | `run(*, claim_category, documents: List[DocumentMetadata], classifications: Optional[Dict[str, DocumentClassification]])` |
 | Output | `DocumentVerificationResult { status, required_documents, received_documents, missing_documents, wrong_documents, quality_issues, classifications, user_message, confidence, ai_calls }` |
-| Dependencies | `AIProvider` (via `BaseAgent`) + `PolicyRepository` |
-| AI interaction | For each document **without** a pre-supplied `DocumentClassification`, calls `AIProvider.generate_structured()` with the prompt/schema in `app/ai/prompts/document_verification.py`. Documents that already have one (evaluation fixtures, or a real document classified earlier) skip the AI call entirely. Each real call's `AITraceMetadata` (provider, model, latency, token counts) is collected into `ai_calls` — empty if every document was pre-classified. Verified against a real successful Gemini call — see `docs/AI_HANDOFF.md` "Real AI Verification." |
+| Dependencies | `AIProvider` (via `BaseAgent`) + `PolicyRepository` + `DocumentStorage` (only used when a document carries a `storage_reference`) |
+| AI interaction | For each document **without** a pre-supplied `DocumentClassification`: if it has a `storage_reference` (a real upload), `_classify_from_content()` reads the actual bytes via `DocumentStorage.read()` and calls `AIProvider.analyze_document()` — real multimodal classification from the document's actual visual content, never filename or declared type. If it has no `storage_reference` (an evaluation fixture with no `actual_type` supplied — rare, since fixtures normally pre-supply ground truth), `_classify_from_text_only()` calls `AIProvider.generate_structured()` using `build_document_classification_request()` as a documented fallback. Documents that already have a pre-supplied `DocumentClassification` skip the AI call entirely. Each real call's `AITraceMetadata` (provider, model, latency, token counts) is collected into `ai_calls`. Verified against real Gemini calls on real uploaded files — see `docs/AI_HANDOFF.md` "Real Document Upload Verification." |
 | Errors | `ExtractionError` if the AI response can't be parsed into a valid `DocumentClassification` (invalid enum value, missing field) |
 | Failure behavior | Raises on a genuine AI/parse failure — the caller (`ClaimsPipeline`) is responsible for catching this and degrading gracefully; the agent itself does not swallow errors or silently assume a document is valid |
 
@@ -377,8 +377,8 @@ Priority order, highest first: any `UNREADABLE`/`PARTIAL` quality document → `
 ### `user_message` generation
 Built entirely from the structured result (`missing`, `wrong`, `quality_issues`, `received_documents` with counts) — never a hardcoded per-test-case string. Same code path produces TC001's and TC002's messages.
 
-### Real vs. provisional AI classification (Phase 2A limitation)
-No file-upload/OCR pipeline exists yet, so the AI path classifies from **filename + declared type only** — a genuine real AI call (see `docs/AI_HANDOFF.md`, live-verification results), but not real document/image understanding. `app/ai/prompts/document_verification.py`'s `hint_text` parameter is where OCR text or an inline image part will be added once file upload lands — the schema and parsing already accommodate it without changes.
+### Real vs. fallback AI classification
+The primary path is real multimodal document understanding: `analyze_document()` is given the document's actual bytes (base64-encoded, wrapped in `ImageContent`/`DocumentContent`) and returns type/quality/patient-name/confidence extracted from what the model actually sees — verified end-to-end with real uploaded synthetic prescription/bill images and a real Gemini API key (see `docs/AI_HANDOFF.md`). The text-only `generate_structured()` path exists solely for evaluation fixtures that supply no `actual_type` and therefore have no bytes to analyze — it is not used for any real upload, since every real upload always has a `storage_reference`.
 
 ---
 
@@ -408,12 +408,32 @@ No file-upload/OCR pipeline exists yet, so the AI path classifies from **filenam
 
 | Property | Value |
 |----------|-------|
-| Purpose | The single input boundary: converts `ClaimSubmissionRequest` (the API request shape) into `(ClaimSubmission, Dict[str, DocumentClassification])` — the shape every downstream component consumes, whether the caller is a real API client or the evaluation runner. |
-| Input | `ClaimSubmissionRequest` — real submissions set only `file_id`/`file_name`/`declared_type`; the evaluation fixtures additionally set `actual_type`/`quality`/`patient_name_on_doc` (ground truth standing in for an AI classification) |
-| Output | `ClaimSubmission` (domain) + a classifications map containing an entry **only** for documents that had `actual_type` supplied |
-| Supported sources | HTTP API request body; `app/evaluation/runner.py`'s `request_from_test_case()` (test_cases.json → this same shape) |
-| Errors | None — Pydantic validation on `ClaimSubmissionRequest` itself handles malformed input before this adapter runs |
-| Guarantee | Contains **no business rules** (no validity/coverage logic) and **no per-test-case knowledge** — it does not know "TC001" exists. This is what keeps the fixture/real-submission distinction outside every business agent, per the assignment's explicit requirement. |
+| Purpose | The single input boundary, with two entry points that both converge on the same output shape: `(ClaimSubmission, Dict[str, DocumentClassification])` — consumed identically by `ClaimsPipeline` regardless of which entry point produced it. |
+| `to_domain(request: ClaimSubmissionRequest)` | The **fixture path** — evaluation test cases only. Converts ground-truth fields (`actual_type`/`quality`/`patient_name_on_doc`) into a pre-supplied classifications map, standing in for an AI classification so `test_cases.json` cases run deterministically without hitting a real AI provider. |
+| `from_uploads(fields: ClaimSubmissionFields, uploads: List[UploadLike], document_storage: DocumentStorage)` | The **real-submission path** — reads each `UploadLike` (a `Protocol`, not `fastapi.UploadFile`, so this stays framework-agnostic), validates it via `validate_upload()`, saves it via `document_storage.save()`, and builds `DocumentMetadata` entries with a `storage_reference` set and **no** pre-supplied classification — forcing `DocumentVerificationAgent` down its real multimodal path. |
+| Output | `ClaimSubmission` (domain) + a classifications map containing an entry **only** for documents that had ground truth supplied (fixtures) — always empty for real uploads |
+| Supported sources | `app/api/v1/claims.py` (multipart `UploadFile`s via `from_uploads`); `app/evaluation/runner.py`'s `request_from_test_case()` (test_cases.json → `to_domain`) |
+| Errors | `from_uploads` propagates `UnsupportedDocumentTypeError`/`EmptyDocumentError`/`DocumentTooLargeError` from `validate_upload()` — all recoverable `DocumentError` subclasses the API layer turns into 4xx responses, never a 500 |
+| Guarantee | Neither entry point contains business rules (no validity/coverage logic) or per-test-case knowledge — `to_domain` does not know "TC001" exists, and `from_uploads` does not know what a valid claim looks like. Both entry points are the **only** place the real/fixture distinction exists; every downstream component (agents, `ClaimsPipeline`) is identical either way. |
+
+---
+
+## DocumentStorage
+
+**File**: `app/storage/document_storage.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | Abstraction over where uploaded document bytes physically live — filesystem today, swappable to S3 (or similar) later without touching the pipeline, agents, or API layer. |
+| Interface | `save(claim_id: str, filename: str, content: bytes) -> str` (returns a `storage_reference`), `read(storage_reference: str) -> bytes`, `delete(storage_reference: str) -> None` |
+| Implementation | `LocalFileDocumentStorage(base_dir)` — writes to `{base_dir}/{claim_id}/{generated_filename}` |
+| `generate_storage_filename()` | Produces `{uuid4}.{validated_extension}` — **never** the client's original filename, closing both path-traversal and filename-collision risk at the source |
+| `validate_upload()` | Checks: file is non-empty, size ≤ `settings.max_upload_bytes`, extension is one of `.pdf`/`.jpg`/`.jpeg`/`.png`, and the file's **magic bytes** match a real PDF (`%PDF`)/JPEG (`\xff\xd8\xff`)/PNG (`\x89PNG\r\n\x1a\n`) signature — a spoofed `Content-Type` header alone cannot pass |
+| Path safety | `LocalFileDocumentStorage._resolve()` does a `Path.resolve()` + containment check against `base_dir` as defense-in-depth, even though `storage_reference` is always server-generated, never client-supplied |
+| Never exposed | `storage_reference` lives on the domain model (`DocumentMetadata.storage_reference`) and the ORM (`ClaimDocumentORM.storage_reference`) but is explicitly excluded from `ClaimDocumentSummary` (the API response schema) — no endpoint ever returns a filesystem path |
+| Consumers | `app/api/v1/claims.py` (`save`, at upload time), `DocumentVerificationAgent._classify_from_content()` (`read`, for real multimodal classification) |
 
 ---
 
@@ -442,10 +462,12 @@ No file-upload/OCR pipeline exists yet, so the AI path classifies from **filenam
 
 | Endpoint | Contract |
 |----------|----------|
-| `POST /api/v1/claims` | Body: `ClaimSubmissionRequest`. Runs the full Phase 2A pipeline synchronously and returns `ClaimResponse` (201). Never 500s on an AI/pipeline failure — see `ClaimsPipeline`'s guarantee above; a technical failure still comes back as a normal `ClaimResponse` with `status=BLOCKED`. |
-| `GET /api/v1/claims/{claim_id}` | Returns `ClaimResponse`, or `404` if the claim_id is unknown. Never exposes raw SQLAlchemy rows — `ClaimRepository._to_domain` and `ClaimResponse.from_claim` are the only conversion points. |
+| `POST /api/v1/claims` | **`multipart/form-data`** (not JSON): `member_id`/`policy_id`/`claim_category`/`treatment_date`/`claimed_amount`/`hospital_name`/`ytd_claims_amount` as `Form(...)` fields, plus one or more real files under the `documents` field as `File(...)`. Each file is validated (`validate_upload()`), stored (`DocumentStorage.save()`), then handed to `DocumentInputAdapter.from_uploads()`. Runs the full Phase 2A pipeline synchronously (including real multimodal classification) and returns `ClaimResponse` (201). A validation failure (bad file type, empty file, oversized file) returns a 4xx with a `DocumentError` message before any AI call is made. Never 500s on an AI/pipeline failure — see `ClaimsPipeline`'s guarantee above; a technical failure still comes back as a normal `ClaimResponse` with `status=BLOCKED`. |
+| `GET /api/v1/claims/{claim_id}` | Returns `ClaimResponse`, or `404` if the claim_id is unknown. Never exposes raw SQLAlchemy rows or `storage_reference` — `ClaimRepository._to_domain` and `ClaimResponse.from_claim` are the only conversion points, and `ClaimDocumentSummary` deliberately excludes `storage_reference`. |
 
 `ClaimResponse` never includes decision fields (`APPROVED`/`PARTIAL`/`REJECTED`/`MANUAL_REVIEW`) — those don't exist until a later phase.
+
+There is no document-type field anywhere in the request — the member cannot declare what a document is; `DocumentVerificationAgent` determines it from the file's actual content.
 
 ---
 

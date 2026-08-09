@@ -151,11 +151,17 @@ deliberately stops there. No policy evaluation, financial calculation, or
 decision (APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW) exists yet.
 
 ```
-POST /api/v1/claims
+POST /api/v1/claims  (multipart/form-data: fields + real files)
         │
         ▼
-DocumentInputAdapter.to_domain(request)
-        │  → (ClaimSubmission, {file_id: DocumentClassification})
+validate_upload() per file   (magic bytes, size, extension — never trust Content-Type)
+        │
+        ▼
+DocumentStorage.save() per file   → storage_reference (UUID filename, never client's)
+        │
+        ▼
+DocumentInputAdapter.from_uploads(fields, uploads, document_storage)
+        │  → (ClaimSubmission, {})   ← empty: no classification pre-supplied for real uploads
         ▼
 ClaimsPipeline.run(claim, classifications, tracer)
         │
@@ -163,8 +169,10 @@ ClaimsPipeline.run(claim, classifications, tracer)
         │       │ invalid → stop, status=BLOCKED
         │       ▼
         ├─▶ DocumentVerificationAgent       (required docs from PolicyRepository;
-        │       │                            AI-classifies any document without a
-        │       │                            pre-supplied classification)
+        │       │                            reads real bytes via DocumentStorage.read()
+        │       │                            and calls AIProvider.analyze_document() —
+        │       │                            classification from actual content, never
+        │       │                            filename or user selection)
         │       │ NEEDS_RESUBMISSION → stop, status=DOCUMENTS_PENDING
         │       │ BLOCKED            → stop, status=BLOCKED
         │       ▼
@@ -174,6 +182,13 @@ ClaimsPipeline.run(claim, classifications, tracer)
                 ▼
         status=PROCESSING ("Phase 2A cleared, policy evaluation not yet implemented")
 ```
+
+The evaluation runner takes a parallel path through the same pipeline:
+`DocumentInputAdapter.to_domain(test_case)` → pre-supplied classifications
+(ground truth from `test_cases.json`, no `DocumentStorage`/AI call involved)
+→ the identical `ClaimsPipeline.run(...)`. Both paths converge immediately
+after the input boundary; no agent or pipeline code knows or cares which
+one produced its input. See "Real vs. fixture input" below.
 
 ### Claim validation
 `ClaimValidationAgent` is purely deterministic (`ai_provider=None`) — member
@@ -186,15 +201,36 @@ decides whether that's a stop.
 ### Document verification
 `DocumentVerificationAgent` is the one place a real AI call happens in
 Phase 2A. For each document, it uses a pre-supplied `DocumentClassification`
-if one exists (see "Real vs. fixture input" below) — otherwise it calls the
-injected `AIProvider.generate_structured()` with the prompt/schema in
-`app/ai/prompts/document_verification.py`. Required/optional document types
-per category come from `PolicyRepository.get_document_requirements()`,
-never a Python `if category == "CONSULTATION"` branch. The `user_message`
-returned to the member is generated from the structured result (counts of
-what was uploaded, what's missing, what's unreadable) — the same code
-produces TC001's and TC002's very different messages; nothing is
-hardcoded per test case.
+if one exists (see "Real vs. fixture input" below); otherwise it branches on
+whether the document has a `storage_reference`. A real upload always does —
+`_classify_from_content()` reads the actual bytes via `DocumentStorage.read()`
+and calls the injected `AIProvider.analyze_document()`, Gemini's multimodal
+path, so the type/quality/patient-name/confidence come from what the model
+actually sees in the image or PDF, never from the filename or any
+user-declared type (there is no such field in the API anymore). A fixture
+with no ground truth (rare) falls back to `_classify_from_text_only()` via
+`AIProvider.generate_structured()`. Required/optional document types per
+category come from `PolicyRepository.get_document_requirements()`, never a
+Python `if category == "CONSULTATION"` branch. The `user_message` returned
+to the member is generated from the structured result (counts of what was
+uploaded, what's missing, what's unreadable) — the same code produces
+TC001's and TC002's very different messages; nothing is hardcoded per test
+case. Verified against real uploaded synthetic documents processed by the
+real Gemini API — see `docs/AI_HANDOFF.md` "Real Document Upload
+Verification."
+
+### Document storage
+`DocumentStorage` (an ABC in `app/storage/document_storage.py`) is injected
+into the API layer the same way `AIProvider` and `TraceService` are — no
+agent imports it directly except `DocumentVerificationAgent`, and only to
+call `read()`. `LocalFileDocumentStorage` writes validated bytes to
+`{upload_dir}/{claim_id}/{uuid}.{ext}`; the UUID filename (never the
+client's original filename) closes path-traversal and collision risk at
+the point of storage, not as an afterthought. `storage_reference` — the
+actual disk path — is on the domain model and ORM row but is deliberately
+excluded from every API response schema; a client can see a document's
+original filename, AI-determined type/quality/patient/confidence, and
+processing status, never where it physically lives on disk.
 
 ### Cross-document validation
 `CrossDocumentValidationAgent` is also purely deterministic — it compares
@@ -204,15 +240,19 @@ AI itself; if the classification step got the name wrong, that's a
 document-verification-quality problem, not a cross-document one.
 
 ### Real vs. fixture input — one boundary, not two systems
-`DocumentInputAdapter` is the single place that decides whether a document
-already has ground truth (`actual_type`/`quality`/`patient_name_on_doc`,
-which the evaluation runner supplies from `test_cases.json`) or needs a
-real AI classification (a real API submission, which only ever sets
-`declared_type`). Both cases produce the exact same
-`(ClaimSubmission, Dict[str, DocumentClassification])` shape that
-`ClaimsPipeline` consumes — no agent branches on "is this a test case."
-This is deliberately the same pattern as the AI provider abstraction:
-swap what's behind the boundary, not the code that consumes it.
+`DocumentInputAdapter` exposes two entry points — `to_domain()` for
+evaluation fixtures (ground truth from `test_cases.json`: `actual_type`/
+`quality`/`patient_name_on_doc`) and `from_uploads()` for real API
+submissions (actual `UploadFile`s, validated and persisted via
+`DocumentStorage` before the adapter ever sees them). Both produce the
+exact same `(ClaimSubmission, Dict[str, DocumentClassification])` shape
+that `ClaimsPipeline` consumes — for a real upload the classifications map
+is always empty, forcing `DocumentVerificationAgent` down its real
+multimodal path; for a fixture it's pre-populated, skipping the AI call
+entirely. No agent branches on "is this a test case" or "is this a real
+upload" — the data shape alone determines behavior. This is deliberately
+the same pattern as the AI provider abstraction: swap what's behind the
+boundary, not the code that consumes it.
 
 ### Early stopping, in the trace
 See "Observability" above for the full event-type rationale. Concretely,
@@ -325,6 +365,8 @@ claim, HTTP response — degraded exactly as designed.
 
 **Registration note**: SQLAlchemy declarative classes register with `Base.metadata` at import time, not at table-creation time. `init_database()` explicitly imports `app.repositories.trace_models` before calling `Base.metadata.create_all` — any future ORM module needs the same explicit import there, or its table silently won't be created.
 
+**No migration story**: `Base.metadata.create_all` only creates tables that don't exist — it never alters an existing table's columns. Adding columns to `ClaimDocumentORM` during the Real Document Upload correction (`mime_type`, `size_bytes`, `storage_reference`, `patient_name`, `confidence`, `processing_status`) required deleting the gitignored local dev `data/claims.db` so it would regenerate with the new schema; a real migration tool (e.g. Alembic) would be needed before this matters for a deployed environment with data worth preserving across schema changes.
+
 ---
 
 ## AI Provider Interface
@@ -335,7 +377,7 @@ The `AIProvider` ABC exposes three core capabilities:
 |--------|----------|--------|
 | `generate_text()` | Explanations, member messages | `AIGenerateResponse` |
 | `generate_structured()` | Extraction, classification | `AIStructuredResponse` |
-| `analyze_document()` | OCR, document type detection | `DocumentAnalysisResponse` |
+| `analyze_document()` | Real multimodal classification of uploaded document bytes (type/quality/patient/confidence) | `DocumentAnalysisResponse` |
 
 Structured output uses Anthropic's `tool_use` feature (or Gemini's
 `response_schema`/`response_mime_type=application/json`) to guarantee JSON
@@ -347,24 +389,41 @@ schema conformance, depending on which provider is configured.
 
 ```
 src/
-├── App.tsx                    ← Router + layout shell
-├── main.tsx                   ← React entry point
-├── types/index.ts             ← TypeScript types (mirrors backend models)
-├── services/api.ts            ← API client abstraction (systemApi, traceApi)
-├── hooks/useHealth.ts         ← Data-fetching hook
-├── hooks/useClaimTrace.ts     ← Data-fetching hook for claim trace events
-├── components/TraceViewer.tsx ← Reusable trace-event timeline component
-└── pages/Dashboard.tsx        ← System health dashboard
+├── App.tsx                       ← Router + layout shell
+├── main.tsx                      ← React entry point
+├── types/index.ts                ← TypeScript types (mirrors backend models)
+├── services/api.ts               ← API client abstraction (systemApi, traceApi, claimsApi)
+├── hooks/useHealth.ts            ← Data-fetching hook
+├── hooks/useClaimTrace.ts        ← Data-fetching hook for claim trace events
+├── components/TraceViewer.tsx    ← Reusable trace-event timeline component
+├── pages/Dashboard.tsx           ← System health dashboard
+├── pages/ClaimSubmission.tsx     ← Real file-upload claim submission form
+└── pages/ClaimDetail.tsx         ← Claim result + per-document AI results + TraceViewer
 ```
 
 All backend calls go through `services/api.ts`. Components never call `fetch()` directly.
+`claimsApi.submit()` is the one method that talks multipart: it builds a
+`FormData` from real `File` objects and posts it via `requestMultipart()`
+(deliberately omits a `Content-Type` header so the browser sets the
+multipart boundary itself — setting it manually breaks the request).
 
 `TraceViewer` is pure presentation — it takes `events: TraceEvent[]` as a
 prop and renders them; it does not fetch data itself and has no notion of
-"claim". `useClaimTrace` is the data-fetching counterpart. Neither is
-wired into a page yet (Phase 1 scope is the reusable component/hook
-foundation, not the claim detail page that will eventually host them —
-that arrives with the claims UI in Phase 2).
+"claim". `useClaimTrace` is the data-fetching counterpart. Both are mounted
+in `ClaimDetail.tsx` against real backend data.
+
+`ClaimSubmission.tsx` has no document-type field of any kind — a hidden
+`<input type="file" accept=".pdf,.jpg,.jpeg,.png" multiple>`, triggered by
+a styled "+ Add Document" button, is the only way to attach documents.
+Selected files are held in local component state (name/size/the `File`
+object itself) and rendered as a list with a Remove control per file; the
+component also runs its own type/emptiness validation before submit as
+defense-in-depth against a bypass of the input's `accept` filter (e.g.
+drag-and-drop, or "All Files" in the OS picker) — the backend's
+`validate_upload()` is still the authoritative check. `ClaimDetail.tsx`'s
+`DocumentCard` renders each document's AI-determined Type/Quality/Patient/
+Confidence exactly as the API returns them; nothing is inferred or
+guessed client-side.
 
 ---
 

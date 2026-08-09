@@ -12,11 +12,12 @@ from __future__ import annotations
 import pytest
 
 from app.agents.document_verification_agent import DocumentVerificationAgent
-from app.ai.schemas.ai_schemas import AIStructuredResponse
+from app.ai.schemas.ai_schemas import AIStructuredResponse, DocumentAnalysisResponse
 from app.domain.errors import ExtractionError
 from app.domain.models import ClaimCategory, DocumentMetadata, DocumentQuality, DocumentType
 from app.domain.verification import DocumentClassification, DocumentVerificationStatus
 from app.policy.policy_repository import PolicyRepository
+from app.storage.document_storage import DocumentStorage
 
 
 @pytest.fixture
@@ -185,9 +186,12 @@ class _FakeAIProvider:
 
 
 class TestAIClassificationPath:
-    """Covers documents with NO pre-supplied classification — the real,
-    non-fixture path DocumentVerificationAgent takes for actual
-    submissions. Uses a fake AIProvider double (not a vendor SDK)."""
+    """
+    Covers documents with NO pre-supplied classification AND no
+    storage_reference — the text-only fallback path (see
+    TestRealContentClassificationPath below for the actual real-upload
+    path, which reads real bytes). Uses a fake AIProvider double (not a
+    vendor SDK)."""
 
     @pytest.mark.anyio
     async def test_calls_ai_provider_when_no_classification_supplied(self):
@@ -273,3 +277,126 @@ class TestConfidence:
             claim_category=ClaimCategory.CONSULTATION, documents=docs, classifications=classifications
         )
         assert result.confidence is None
+
+
+class _FakeDocumentStorage(DocumentStorage):
+    """In-memory DocumentStorage double — no real filesystem I/O."""
+
+    def __init__(self, contents: dict[str, bytes]):
+        self._contents = contents
+        self.read_refs: list[str] = []
+
+    async def save(self, *, claim_id: str, filename: str, content: bytes) -> str:
+        raise NotImplementedError("not needed for these tests")
+
+    async def read(self, storage_reference: str) -> bytes:
+        self.read_refs.append(storage_reference)
+        return self._contents[storage_reference]
+
+
+class _FakeAnalyzeDocumentProvider:
+    """AIProvider double implementing only analyze_document — proves
+    DocumentVerificationAgent calls the real multimodal path, not
+    generate_structured, when a document has actual stored bytes."""
+
+    def __init__(self, structured_data: dict):
+        self._data = structured_data
+        self.calls = 0
+        self.last_request = None
+
+    async def analyze_document(self, request):
+        self.calls += 1
+        self.last_request = request
+        return DocumentAnalysisResponse(
+            structured_data=self._data, model="fake-vision-model", provider="fake"
+        )
+
+    async def generate_structured(self, request):  # pragma: no cover — must never be called
+        raise AssertionError("real-content documents must use analyze_document, not generate_structured")
+
+
+class TestRealContentClassificationPath:
+    """
+    The actual production path (Phase 2A correction): a document with a
+    storage_reference is read from DocumentStorage and classified from its
+    real bytes via AIProvider.analyze_document() — never from filename or
+    declared_type alone.
+    """
+
+    @pytest.mark.anyio
+    async def test_reads_real_bytes_and_calls_analyze_document(self):
+        storage = _FakeDocumentStorage({"CLM-1/abc.jpg": b"\xff\xd8\xff-real-jpeg-bytes"})
+        provider = _FakeAnalyzeDocumentProvider(
+            {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.94}
+        )
+        agent = DocumentVerificationAgent(
+            ai_provider=provider, policy_repository=PolicyRepository(), document_storage=storage
+        )
+        docs = [
+            DocumentMetadata(
+                file_id="abc", file_name="rx.jpg", mime_type="image/jpeg", storage_reference="CLM-1/abc.jpg"
+            ),
+            DocumentMetadata(
+                file_id="def", file_name="bill.jpg", mime_type="image/jpeg", storage_reference="CLM-1/def.jpg"
+            ),
+        ]
+        storage._contents["CLM-1/def.jpg"] = b"\xff\xd8\xff-another-real-jpeg"
+
+        result = await agent.run(claim_category=ClaimCategory.CONSULTATION, documents=docs, classifications={})
+
+        assert provider.calls == 2
+        assert storage.read_refs == ["CLM-1/abc.jpg", "CLM-1/def.jpg"]
+        rx = next(c for c in result.classifications if c.file_id == "abc")
+        assert rx.document_type == DocumentType.PRESCRIPTION
+        assert rx.patient_name == "Rajesh Kumar"
+        assert rx.confidence == 0.94
+
+    @pytest.mark.anyio
+    async def test_filename_alone_never_determines_type(self):
+        """A file literally named 'prescription.jpg' whose real content the
+        AI reads as a hospital bill must be classified as a hospital bill —
+        the filename is context, never the answer."""
+        storage = _FakeDocumentStorage({"CLM-1/x.jpg": b"\xff\xd8\xff-content"})
+        provider = _FakeAnalyzeDocumentProvider(
+            {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "", "confidence": 0.9}
+        )
+        agent = DocumentVerificationAgent(
+            ai_provider=provider, policy_repository=PolicyRepository(), document_storage=storage
+        )
+        docs = [
+            DocumentMetadata(
+                file_id="x", file_name="prescription.jpg", mime_type="image/jpeg", storage_reference="CLM-1/x.jpg"
+            )
+        ]
+
+        result = await agent.run(claim_category=ClaimCategory.CONSULTATION, documents=docs, classifications={})
+
+        assert result.classifications[0].document_type == DocumentType.HOSPITAL_BILL
+
+    @pytest.mark.anyio
+    async def test_ai_metadata_captured_for_real_content_call(self):
+        storage = _FakeDocumentStorage({"CLM-1/x.jpg": b"\xff\xd8\xff-content"})
+        provider = _FakeAnalyzeDocumentProvider(
+            {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "", "confidence": 0.8}
+        )
+        agent = DocumentVerificationAgent(
+            ai_provider=provider, policy_repository=PolicyRepository(), document_storage=storage
+        )
+        docs = [DocumentMetadata(file_id="x", file_name="rx.jpg", mime_type="image/jpeg", storage_reference="CLM-1/x.jpg")]
+
+        result = await agent.run(claim_category=ClaimCategory.CONSULTATION, documents=docs, classifications={})
+
+        assert result.ai_calls[0].provider == "fake"
+        assert result.ai_calls[0].model == "fake-vision-model"
+
+    @pytest.mark.anyio
+    async def test_no_structured_data_raises_extraction_error(self):
+        storage = _FakeDocumentStorage({"CLM-1/x.jpg": b"\xff\xd8\xff-content"})
+        provider = _FakeAnalyzeDocumentProvider(None)  # simulates a response with no structured_data
+        agent = DocumentVerificationAgent(
+            ai_provider=provider, policy_repository=PolicyRepository(), document_storage=storage
+        )
+        docs = [DocumentMetadata(file_id="x", file_name="rx.jpg", mime_type="image/jpeg", storage_reference="CLM-1/x.jpg")]
+
+        with pytest.raises(ExtractionError):
+            await agent.run(claim_category=ClaimCategory.CONSULTATION, documents=docs, classifications={})

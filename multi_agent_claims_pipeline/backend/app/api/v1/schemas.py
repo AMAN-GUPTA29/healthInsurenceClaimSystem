@@ -15,7 +15,14 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
-from app.domain.models import Claim, ClaimCategory, ClaimStatus, DocumentQuality, DocumentType
+from app.domain.models import (
+    Claim,
+    ClaimCategory,
+    ClaimStatus,
+    DocumentProcessingStatus,
+    DocumentQuality,
+    DocumentType,
+)
 from app.domain.verification import (
     CrossDocumentValidationResult,
     DocumentVerificationResult,
@@ -24,10 +31,21 @@ from app.domain.verification import (
 
 
 class ClaimDocumentSummary(BaseModel):
+    """
+    Note: deliberately excludes `storage_reference` — that's an internal
+    DocumentStorage detail, never exposed through the API (no filesystem
+    paths leaked to clients).
+    """
+
     file_id: str
     file_name: Optional[str] = None
+    mime_type: Optional[str] = None
+    size_bytes: Optional[int] = None
     document_type: Optional[DocumentType] = None
     quality: Optional[DocumentQuality] = None
+    patient_name: Optional[str] = None
+    confidence: Optional[float] = None
+    processing_status: DocumentProcessingStatus = DocumentProcessingStatus.PENDING
 
 
 class ClaimResponse(BaseModel):
@@ -67,8 +85,13 @@ class ClaimResponse(BaseModel):
                 ClaimDocumentSummary(
                     file_id=d.metadata.file_id,
                     file_name=d.metadata.file_name,
+                    mime_type=d.metadata.mime_type,
+                    size_bytes=d.metadata.size_bytes,
                     document_type=d.effective_type,
                     quality=d.metadata.quality,
+                    patient_name=d.metadata.patient_name,
+                    confidence=d.metadata.confidence,
+                    processing_status=d.metadata.processing_status,
                 )
                 for d in claim.documents
             ],

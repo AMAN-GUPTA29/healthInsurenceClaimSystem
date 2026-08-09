@@ -1,12 +1,23 @@
 """
 Claim submission and retrieval endpoints.
 
-POST /api/v1/claims             — submit a claim, run it through the
+POST /api/v1/claims             — submit a claim with real uploaded
+                                   documents (multipart/form-data: PDF,
+                                   JPEG, or PNG), run it through the
                                    Phase 2A pipeline (claim validation ->
                                    document verification -> cross-document
                                    validation), persist it, return it.
 GET  /api/v1/claims/{claim_id}  — retrieve a previously submitted claim's
                                    current state.
+
+Production path (this endpoint):
+    multipart upload -> DocumentInputAdapter.from_uploads() -> DocumentStorage
+        -> ClaimsPipeline -> DocumentVerificationAgent -> AIProvider.analyze_document()
+
+Evaluation path (test_cases.json fixtures, used by app/evaluation/runner.py,
+never over HTTP): DocumentInputAdapter.to_domain() -> the same ClaimsPipeline.
+Both converge on the same internal (ClaimSubmission, classifications) shape
+before either ever reaches an agent — see DocumentInputAdapter's docstring.
 
 Neither endpoint produces a final decision yet (APPROVED/PARTIAL/REJECTED/
 MANUAL_REVIEW) — that's later phases. A claim that clears all three
@@ -16,18 +27,22 @@ message; policy evaluation hasn't run.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from datetime import date
+from decimal import Decimal, InvalidOperation
+from typing import List, Optional
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.api.deps import (
     ClaimRepositoryDep,
     ClaimsPipelineDep,
     DocumentInputAdapterDep,
+    DocumentStorageDep,
 )
 from app.api.v1.schemas import ClaimResponse
-from app.domain.models import Claim
+from app.domain.models import Claim, ClaimCategory, generate_claim_id
 from app.domain.trace import TraceContext
 from app.repositories.trace_repository import TraceRepository
-from app.services.document_input_adapter import ClaimSubmissionRequest
 from app.tracing.service import TraceService
 
 router = APIRouter()
@@ -39,24 +54,62 @@ router = APIRouter()
     status_code=201,
     summary="Submit a Claim",
     description=(
-        "Submits a claim and runs it through claim validation, document "
-        "verification, and cross-document validation. Stops early and "
-        "returns a specific, actionable message if any stage blocks the "
-        "claim or asks for a document to be re-uploaded."
+        "Submits a claim with real uploaded documents (PDF/JPEG/PNG, "
+        "multipart/form-data) and runs it through claim validation, "
+        "document verification, and cross-document validation. Stops "
+        "early and returns a specific, actionable message if any stage "
+        "blocks the claim or asks for a document to be re-uploaded."
     ),
     tags=["Claims"],
 )
 async def submit_claim(
-    request: ClaimSubmissionRequest,
     document_input_adapter: DocumentInputAdapterDep,
     pipeline: ClaimsPipelineDep,
     claim_repository: ClaimRepositoryDep,
+    document_storage: DocumentStorageDep,
+    member_id: str = Form(...),
+    policy_id: str = Form(...),
+    claim_category: str = Form(...),
+    treatment_date: date = Form(...),
+    claimed_amount: str = Form(...),
+    hospital_name: Optional[str] = Form(None),
+    ytd_claims_amount: str = Form("0"),
+    simulate_component_failure: bool = Form(False),
+    documents: List[UploadFile] = File(...),
 ) -> ClaimResponse:
-    submission, classifications = document_input_adapter.to_domain(request)
-    claim = Claim(submission=submission)
+    try:
+        category = ClaimCategory(claim_category)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Invalid claim_category: '{claim_category}'.")
+
+    try:
+        amount = Decimal(claimed_amount)
+        ytd_amount = Decimal(ytd_claims_amount)
+    except InvalidOperation:
+        raise HTTPException(status_code=422, detail="claimed_amount/ytd_claims_amount must be numeric.")
+
+    claim_id = generate_claim_id()
+
+    # Validation/storage errors (unsupported type, empty, too large) raise
+    # DocumentError subclasses — main.py's ClaimsSystemError handler turns
+    # these into a structured 422, never a bare 500.
+    submission = await document_input_adapter.from_uploads(
+        member_id=member_id,
+        policy_id=policy_id,
+        claim_category=category,
+        treatment_date=treatment_date,
+        claimed_amount=amount,
+        hospital_name=hospital_name,
+        ytd_claims_amount=ytd_amount,
+        uploads=documents,
+        claim_id=claim_id,
+        storage=document_storage,
+        simulate_component_failure=simulate_component_failure,
+    )
+    claim = Claim(claim_id=claim_id, submission=submission)
 
     tracer = TraceService(TraceContext.new(claim_id=claim.claim_id), sink=TraceRepository())
-    claim = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+    claim = await pipeline.run(claim, tracer=tracer)
 
     await claim_repository.save(claim)
     return ClaimResponse.from_claim(claim)
