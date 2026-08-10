@@ -16,11 +16,22 @@ The system evaluates OPD health insurance claims using a multi-agent AI pipeline
 
 ## Current Phase
 
-**Phase 2B — Document Extraction & Structured Medical Data** ✅ COMPLETE
+**Phase 2C — Policy Engine, Financial Calculation & Fraud Analysis** ✅ COMPLETE
 (Phase 0 — Foundation & Architecture ✅ COMPLETE, Phase 1 — Observability &
 Trace Infrastructure ✅ COMPLETE, Phase 2A — Claim Foundation & Early
-Document Verification, including the Real Document Upload correction, ✅
-COMPLETE — history preserved below)
+Document Verification, including the Real Document Upload correction and
+the post-hoc member-identity-validation fix, ✅ COMPLETE, Phase 2B —
+Document Extraction & Structured Medical Data ✅ COMPLETE — history
+preserved below)
+
+> **Phase 2C in one sentence**: three more deterministic pipeline stages —
+> `PolicyEngine` (coverage/limits/waiting-periods/exclusions/pre-auth),
+> `FinancialCalculationService` (Decimal-only payable-amount arithmetic),
+> `FraudAnalysisAgent` (deterministic same-day/monthly/high-value
+> thresholds) — run after document extraction, all soft-fail (never gate
+> the claim), all zero-AI-call. Explicitly does **not** implement the
+> final claim decision (`APPROVED`/`PARTIAL`/`REJECTED`/`MANUAL_REVIEW`) —
+> see "Deliberately not implemented" under the Phase 2C summary below.
 
 > **Phase 2B in one sentence**: a fourth pipeline stage,
 > `DocumentExtractionAgent`, runs after cross-document validation and
@@ -215,9 +226,58 @@ mismatch is unchanged since check (a) still runs first). No Phase 2B files
 `app/ai/prompts/*_extraction.py`) were touched by this fix — Phase 2B's own
 33 tests all continued passing untouched, confirming no regression.
 
+### Policy Evaluation, Financial Calculation & Fraud Analysis Stack (Phase 2C)
+- `app/policy/policy_repository.py` — extended with typed accessors: `is_policy_active()`, `per_claim_limit`/`annual_opd_limit`, `get_category_terms(category) -> CategoryTerms`, `waiting_periods`/`exclusions`/`pre_authorization`, `is_network_hospital()` (exact, normalized match — never fuzzy), `fraud_thresholds`. Still read-only access to `policy_terms.json`, no new source-of-truth writes.
+- `app/domain/policy_evaluation.py` (NEW) — `PolicyRuleFinding`/`PolicyRuleStatus`/`LineItemPolicyFinding`/`PolicyEvaluationResult`
+- `app/domain/fraud.py` (NEW) — `FraudFlag`/`FraudRiskLevel`/`FraudAnalysisResult`
+- `app/domain/models.py` — `FinancialBreakdown` extended (renamed the previously-unused `approved_amount` to `payable_amount`, added `eligible_amount`/`annual_opd_limit`/`annual_limit_applied`/`amount_after_limits`/`currency`/`warnings`/`confidence`); `Claim` gained `policy_evaluation_result`/`financial_calculation_result`/`fraud_analysis_result` (all `Optional`, all soft-fail — don't gate the pipeline)
+- `app/policy/policy_engine.py` (NEW) — `PolicyEngine`: the deterministic policy-rule authority; makes zero AI calls; see `docs/component-contracts.md` "PolicyEngine (Phase 2C)" for the full rule list and `docs/architecture.md` "Policy Evaluation, Financial Calculation & Fraud Analysis (Phase 2C)" for the design rationale
+- `app/services/financial_calculation_service.py` (NEW) — `FinancialCalculationService`: pure `Decimal` arithmetic, fixed calculation order (see Decision 32 and `docs/tradeoffs.md` "Financial Calculation Order")
+- `app/agents/fraud_analysis_agent.py` (NEW) — `FraudAnalysisAgent`: deterministic threshold-based fraud signals, wires up the previously-unused `simulate_component_failure` Phase 0 flag
+- `app/repositories/claim_repository.py` — `list_by_member()` (lightweight, columns-only history query for fraud analysis); `save()`/`_to_domain()` extended to persist/rehydrate the three new result fields
+- `app/repositories/claim_models.py` — `ClaimORM` gained `policy_evaluation_result_json`/`financial_calculation_result_json`/`fraud_analysis_result_json` (simple JSON columns, same pattern as the Phase 2A `*_result_json` columns)
+- `app/pipeline/pipeline.py` — 3 new optional stages (`POLICY_ENGINE`/`FINANCIAL_CALCULATION`/`FRAUD_ANALYSIS`), all soft-fail via new `_run_soft_stage()`; `_PIPELINE_ORDER`/`_DOWNSTREAM_OF` module-level structures ensure every Phase 2A/2B early-stop block explicitly marks all downstream stages `SKIPPED`, not just the immediately-next one (see "A pipeline trace-skip completeness bug" below)
+- `app/api/deps.py` — `get_claims_pipeline()` now constructs and wires `PolicyEngine`/`FinancialCalculationService`/`FraudAnalysisAgent` into `ClaimsPipeline`
+- `app/api/v1/schemas.py` — `ClaimResponse` gained `policy_evaluation_result`/`financial_calculation_result`/`fraud_analysis_result`
+- Frontend `types/index.ts` — TypeScript mirrors of all three new result shapes
+- Frontend `ClaimDetail.tsx` — three new conditionally-rendered sections (Policy Evaluation, Financial Calculation, Fraud Analysis) between "Processing Pipeline" and "Trace"
+- Full contracts in `docs/component-contracts.md`; design rationale (including the deterministic-only rationale, financial ordering, fraud architecture, and scaling notes) in `docs/architecture.md`'s "Policy Evaluation, Financial Calculation & Fraud Analysis (Phase 2C)" section; calculation-order/rounding/matching/normalization trade-offs in `docs/tradeoffs.md`'s "Phase 2C" section
+
+### A pipeline trace-skip completeness bug (found via TDD while building Phase 2C)
+
+**The bug**: the three pre-existing Phase 2A/2B early-stop blocks (invalid
+claim / document verification blocked / cross-document validation
+blocked) each only explicitly marked the *single immediately-next* stage
+`SKIPPED` in the trace. That was correct when `DOCUMENT_EXTRACTION` was
+the last stage — but after adding three more stages downstream of it
+(`POLICY_ENGINE`/`FINANCIAL_CALCULATION`/`FRAUD_ANALYSIS`), a claim that
+stopped at, say, `CROSS_DOCUMENT_VALIDATION` would show those three new
+stages as simply *absent* from the trace rather than explicitly `SKIPPED`
+— indistinguishable from "this trace is incomplete."
+
+**How it was caught**: a regression test written per this phase's own
+requirement to verify the Phase 2A identity fix still early-stops *before*
+Policy/Financial/Fraud run (`TestPhase2AFixStillEarlyStopsBeforePhase2C::
+test_member_identity_mismatch_blocks_before_policy_financial_fraud`)
+failed with `AssertionError: assert TraceComponent.POLICY_ENGINE in
+{DOCUMENT_EXTRACTION}` — the test asked "is POLICY_ENGINE marked skipped?"
+and the honest answer was "it isn't marked anything."
+
+**The fix**: `_PIPELINE_ORDER` (the full 7-stage sequence) and
+`_DOWNSTREAM_OF` (a `Dict[TraceComponent, List[TraceComponent]]` mapping
+each stage to everything after it) were added at module level in
+`app/pipeline/pipeline.py`. Each of the three early-stop blocks now does
+`for component in _DOWNSTREAM_OF[stage]: await tracer.skipped(component, ...)`
+instead of a single hardcoded `tracer.skipped(next_stage, ...)` call. The
+same mapping was also applied retroactively to `_degrade()`'s
+exception-path skip list (previously a separately-hardcoded list of
+remaining stages) for consistency — a pre-existing minor duplication from
+Phase 2B, noticed and cleaned up as part of this same change since it was
+the same class of bug in a second location.
+
 ---
 
-## Implemented Components (Phase 0 + Phase 1 + Phase 2A + Phase 2B)
+## Implemented Components (Phase 0 + Phase 1 + Phase 2A + Phase 2B + Phase 2C)
 
 ### Backend
 
@@ -238,7 +298,7 @@ mismatch is unchanged since check (a) still runs first). No Phase 2B files
 | Database foundation | `app/repositories/database.py` | ✅ |
 | Repository ABC | `app/repositories/base.py` | ✅ |
 | FastAPI app factory | `app/main.py` | ✅ |
-| PolicyEngine placeholder (coverage/waiting-period decisions) | `app/policy/policy_engine.py` | ⬜ stub |
+| PolicyEngine (coverage/waiting-period/exclusion/pre-auth decisions) | `app/policy/policy_engine.py` | ✅ (Phase 2C) |
 | Trace domain models | `app/domain/trace.py` | ✅ |
 | TraceService | `app/tracing/service.py` | ✅ |
 | TraceEventORM | `app/repositories/trace_models.py` | ✅ |
@@ -267,6 +327,15 @@ mismatch is unchanged since check (a) still runs first). No Phase 2B files
 | ClaimsPipeline Stage 4 (extraction, optional agent) | `app/pipeline/pipeline.py` | ✅ |
 | Extraction persistence (hybrid: JSON + queryable columns) | `app/repositories/claim_models.py`, `claim_repository.py` | ✅ |
 | Claim API extraction fields | `app/api/v1/schemas.py` | ✅ |
+| PolicyRepository — Phase 2C typed accessors (limits, waiting periods, exclusions, pre-auth, network, fraud thresholds) | `app/policy/policy_repository.py` | ✅ |
+| PolicyEvaluationResult / FraudAnalysisResult domain models | `app/domain/policy_evaluation.py`, `app/domain/fraud.py` | ✅ |
+| PolicyEngine | `app/policy/policy_engine.py` | ✅ |
+| FinancialCalculationService | `app/services/financial_calculation_service.py` | ✅ |
+| FraudAnalysisAgent | `app/agents/fraud_analysis_agent.py` | ✅ |
+| ClaimRepository — `list_by_member()` history query | `app/repositories/claim_repository.py` | ✅ |
+| ClaimsPipeline Stages 5-7 (Policy/Financial/Fraud, soft-fail) | `app/pipeline/pipeline.py` | ✅ |
+| Policy/Financial/Fraud persistence | `app/repositories/claim_models.py`, `claim_repository.py` | ✅ |
+| Claim API policy/financial/fraud fields | `app/api/v1/schemas.py` | ✅ |
 
 ### Frontend
 
@@ -320,6 +389,12 @@ in passing (`MetadataChips` rendered object-valued metadata, e.g.
 | ClaimsPipeline — extraction stage runs after cross-doc validation, one failure doesn't block the claim, unconfigured agent skips cleanly | `tests/integration/test_claims_pipeline.py` (`TestDocumentExtractionStage`) | ✅ (3 tests) |
 | Claims API — extraction surfaces in the response, survives a DB round-trip | `tests/integration/test_claims_api.py` | ✅ (+1 dedicated persistence test) |
 | ClaimDetail — Extracted Information toggle, document-specific rendering, warnings, failure reason | `frontend/src/pages/ClaimDetail.test.tsx` | ✅ (+3 tests) |
+| PolicyEngine — coverage, limits, waiting periods, exclusions, pre-auth, network, category-specific rules (A-S) | `tests/unit/test_policy_engine.py` | ✅ (36 tests) |
+| FinancialCalculationService — copay, discount ordering, limits, rounding, dental line-item exclusion, bill reconciliation | `tests/unit/test_financial_calculation_service.py` | ✅ (16 tests) |
+| FraudAnalysisAgent — high-value, auto-manual-review, same-day/monthly thresholds, historical claims, AI/deterministic separation, simulated failure | `tests/unit/test_fraud_analysis_agent.py` | ✅ (14 tests) |
+| ClaimsPipeline — full pipeline reaches Policy/Financial/Fraud, Phase 2A identity fix still early-stops before them, Policy failure degrades gracefully without blocking Fraud | `tests/integration/test_claims_pipeline.py` (`TestPolicyFinancialFraudIntegration`, `TestPhase2AFixStillEarlyStopsBeforePhase2C`, `TestPolicyEngineFailureDegradesGracefully`) | ✅ |
+| Claims API — policy/financial/fraud surface in the response, survive a DB round-trip, correctly absent when blocked early | `tests/integration/test_claims_api.py` | ✅ (+2 tests, incl. dedicated persistence round-trip) |
+| ClaimDetail — Policy/Financial/Fraud sections render correctly | `frontend/src/pages/ClaimDetail.test.tsx` | ✅ (+3 tests) |
 
 ---
 
@@ -418,6 +493,21 @@ Adding a required 4th constructor argument to `ClaimsPipeline` would have broken
 ### Decision 31: Member identity flows through `ValidationResult`, not a second `PolicyRepository` lookup (Phase 2A identity-fix)
 When propagating the resolved `Member` from `ClaimValidationAgent` to `CrossDocumentValidationAgent`, two options existed: (a) have `ClaimsPipeline` call `PolicyRepository.get_member()` a second time right before Stage 3, or (b) have `ClaimValidationAgent` — which already looked the member up to check existence — carry that same object forward. Chose (b): added `member: Optional[Member]` to `ValidationResult` and `claim.member = validation_result.member` in the pipeline. This avoids a redundant lookup, uses `Claim.member` (a field that existed since Phase 0 but was always `None` — see the identity-fix section above), and keeps "who resolves member identity" a single responsibility instead of splitting it across two call sites that could drift out of sync.
 
+### Decision 32: Policy/Financial/Fraud are soft-fail stages, not hard-stop (Phase 2C)
+Every Phase 2A stage can early-stop the claim (`status=BLOCKED`) because those checks are prerequisites — there is no meaningful policy evaluation for a claim whose documents don't belong to the claimed member. Policy/Financial/Fraud are different: the assignment explicitly scopes final decision generation out of this phase, so none of the three may set a terminal status. `ClaimsPipeline._run_soft_stage()` (new, sibling to `_run_stage()`) catches any exception, records `FAILED` in the trace, and leaves the corresponding `claim.*_result` field `None` — `claim.status` stays `PROCESSING`, the pipeline keeps going. This is a deliberate, spec-driven departure from Decision 18's "never raise" pattern being paired with an early-stop, not an inconsistency — see `docs/architecture.md` "Policy Evaluation, Financial Calculation & Fraud Analysis (Phase 2C)" for the full rationale.
+
+### Decision 33: `FraudAnalysisAgent` runs independently of `PolicyEngine`/`FinancialCalculationService`'s outcome
+`FinancialCalculationService` is skipped whenever `PolicyEngine` failed or wasn't configured (it has nothing to calculate from), but `FraudAnalysisAgent` is attempted unconditionally — same-day claim patterns, monthly counts, and high-value/auto-manual-review thresholds are meaningful signals regardless of whether coverage or a payable amount could be computed for this specific claim. A claim that fails policy evaluation for an unrelated reason (e.g. malformed extraction data) should still get a fraud read if one is possible, rather than being starved of a signal it doesn't actually depend on.
+
+### Decision 34: Word-boundary matching for diagnosis/condition text, not naive substring containment (Phase 2C)
+Found live, not in the initial automated test suite: naive `phrase in text` matched the specific-condition key `"hernia"` inside the unrelated diagnosis `"Suspected Lumbar Disc Herniation"`. Fixed with `_word_boundary_contains()` (`app/policy/policy_engine.py`), a regex `\b`-delimited whole-word/whole-phrase match, applied to specific-condition waiting-period matching and general exclusion-keyword matching. Dental/vision line-item matching (`_match_short_phrases`) deliberately keeps plain bidirectional substring matching — those are short, closed-vocabulary procedure names, not free-text diagnoses, so the same false-positive risk doesn't apply. Full write-up in `docs/tradeoffs.md` "Diagnosis/Exclusion Normalization".
+
+### Decision 35: Financial caps are applied for real, even where this disagrees with `test_cases.json`'s own worked examples (Phase 2C)
+`FinancialCalculationService` applies `sub_limit` and `per_claim_limit` as genuine caps in the calculation chain, per the assignment brief's literal rule list. For two cases (TC006, TC010), this produces a `payable_amount` that differs from `test_cases.json`'s own stated expected value — the worked examples in both cases look like they were computed *before* those caps were applied, even though `policy_terms.json` defines them and the brief says to apply them. Chose to apply the real policy rule and disclose the discrepancy (`docs/tradeoffs.md` "Financial Calculation Order") rather than silently special-case around two test cases to match numbers that appear to omit an explicitly-documented rule.
+
+### Decision 36: `_PIPELINE_ORDER`/`_DOWNSTREAM_OF` replace hardcoded per-stage skip lists (Phase 2C)
+Adding three new stages exposed a real completeness gap in the three pre-existing early-stop blocks, which each only marked the single next stage `SKIPPED` (see "A pipeline trace-skip completeness bug" above). Rather than hand-edit three blocks to list four more stage names each (fragile — the next new stage would require editing the same three blocks again), `app/pipeline/pipeline.py` now derives the "everything after stage X" list once, from one ordered list of all seven stages. Any future stage addition only requires appending to `_PIPELINE_ORDER`; the skip-completeness property holds automatically.
+
 ---
 
 ## Files/Directories Created
@@ -444,7 +534,8 @@ multi_agent_claims_pipeline/
 │   │   │   ├── claim_validation_agent.py
 │   │   │   ├── document_verification_agent.py
 │   │   │   ├── cross_document_validation_agent.py
-│   │   │   └── document_extraction_agent.py   ← Phase 2B
+│   │   │   ├── document_extraction_agent.py   ← Phase 2B
+│   │   │   └── fraud_analysis_agent.py        ← Phase 2C
 │   │   ├── ai/
 │   │   │   ├── __init__.py
 │   │   │   ├── providers/
@@ -476,7 +567,9 @@ multi_agent_claims_pipeline/
 │   │   │   ├── errors.py
 │   │   │   ├── trace.py
 │   │   │   ├── verification.py
-│   │   │   └── extraction.py          ← Phase 2B: 6 extraction schemas + envelope
+│   │   │   ├── extraction.py          ← Phase 2B: 6 extraction schemas + envelope
+│   │   │   ├── policy_evaluation.py   ← Phase 2C: PolicyRuleFinding/PolicyEvaluationResult
+│   │   │   └── fraud.py               ← Phase 2C: FraudFlag/FraudAnalysisResult
 │   │   ├── evaluation/
 │   │   │   ├── __init__.py
 │   │   │   └── runner.py
@@ -485,8 +578,8 @@ multi_agent_claims_pipeline/
 │   │   │   └── pipeline.py
 │   │   ├── policy/
 │   │   │   ├── __init__.py
-│   │   │   ├── policy_engine.py       ← still a stub (coverage decisions, Phase 3)
-│   │   │   └── policy_repository.py   ← ✅ implemented (Phase 2A)
+│   │   │   ├── policy_engine.py       ← ✅ implemented (Phase 2C)
+│   │   │   └── policy_repository.py   ← ✅ implemented (Phase 2A), extended (Phase 2C)
 │   │   ├── repositories/
 │   │   │   ├── __init__.py
 │   │   │   ├── base.py
@@ -497,7 +590,8 @@ multi_agent_claims_pipeline/
 │   │   │   └── claim_repository.py
 │   │   ├── services/
 │   │   │   ├── __init__.py
-│   │   │   └── document_input_adapter.py
+│   │   │   ├── document_input_adapter.py
+│   │   │   └── financial_calculation_service.py  ← Phase 2C
 │   │   ├── storage/
 │   │   │   ├── __init__.py
 │   │   │   └── document_storage.py     ← DocumentStorage ABC + LocalFileDocumentStorage
@@ -523,14 +617,17 @@ multi_agent_claims_pipeline/
 │   │   │   ├── test_document_storage.py
 │   │   │   ├── test_verification_domain.py
 │   │   │   ├── test_extraction_domain.py         ← Phase 2B (17 tests)
-│   │   │   └── test_document_extraction_agent.py ← Phase 2B (12 tests)
+│   │   │   ├── test_document_extraction_agent.py ← Phase 2B (12 tests)
+│   │   │   ├── test_policy_engine.py              ← Phase 2C (36 tests)
+│   │   │   ├── test_financial_calculation_service.py ← Phase 2C (16 tests)
+│   │   │   └── test_fraud_analysis_agent.py       ← Phase 2C (14 tests)
 │   │   └── integration/
 │   │       ├── __init__.py
 │   │       ├── test_health.py
 │   │       ├── test_trace_persistence.py
 │   │       ├── test_trace_api.py
-│   │       ├── test_claims_pipeline.py    ← +TestDocumentExtractionStage (Phase 2B)
-│   │       ├── test_claims_api.py         ← rewritten for multipart uploads; +extraction/persistence tests (Phase 2B)
+│   │       ├── test_claims_pipeline.py    ← +TestDocumentExtractionStage (Phase 2B), +Policy/Financial/Fraud integration (Phase 2C)
+│   │       ├── test_claims_api.py         ← rewritten for multipart uploads; +extraction/persistence tests (Phase 2B); +policy/financial/fraud tests (Phase 2C)
 │   │       └── test_eval_tc001_tc003.py
 │   ├── pyproject.toml
 │   ├── requirements.txt
@@ -615,7 +712,15 @@ python ../scripts/run_eval.py            # all three
 python ../scripts/run_eval.py TC001      # a single case
 ```
 
-**All tests pass** (298 backend: 250 unit + 48 integration; 35 frontend component tests) — up from Phase 2A's 253 backend / 32 frontend; the 286→298 backend increase is the Phase 2A identity-validation gap fix's 12 new regression tests (see "Phase 2A identity-validation gap fixed" above), not new Phase 2B work.
+**All tests pass** (368 backend, 38 frontend component tests) — up from
+the Phase 2A-identity-fix baseline of 298 backend / 35 frontend; the
++70 backend increase is Phase 2C's 66 new unit tests (36 policy + 16
+financial + 14 fraud) plus new integration/API tests (full pipeline
+reaching Policy/Financial/Fraud, Phase 2A fix still early-stopping before
+them, graceful degradation on a `PolicyEngine` failure, and a dedicated
+restart-persistence round-trip test), and the +3 frontend increase is the
+new Policy/Financial/Fraud `ClaimDetail` sections' tests. See "Phase 2C
+Summary" above for the full breakdown.
 
 Verified end-to-end on 2026-08-09 (Phase 2A + Real Document Upload correction):
 `pytest` (253/253 passing), `vitest run` (30/30 passing), `npm run build`
@@ -641,6 +746,18 @@ messy handwritten-style prescription, an organic real Gemini rate-limit
 failure handled gracefully, and a full backend restart with data verified
 intact — see "Real AI Verification (Phase 2B)" below for the complete
 account.
+
+Verified again on 2026-08-10 (Phase 2C): `pytest` (368/368 passing),
+`scripts/run_eval.py` (TC001/TC002/TC003 still 3/3 PASS, unaffected), the
+real `ClaimsPipeline` manually exercised end-to-end for TC004-TC012's
+scenarios via fixture-supplied extraction (Policy/Financial/Fraud make
+zero AI calls, so this exercises the same real orchestration/trace/
+degrade code the live API uses without depending on network access — see
+"Verification (Phase 2C)" below for why, and for the corporate SSL proxy
+issue that blocked a literal live-Gemini re-verification this session), a
+real false-positive bug found and fixed live (word-boundary matching,
+Decision 34), and a dedicated database-round-trip regression test
+confirming the three new results survive persistence and rehydration.
 
 ---
 
@@ -849,6 +966,104 @@ above, not just automated tests with fakes.
 
 ---
 
+## Verification (Phase 2C) — ✅ VERIFIED 2026-08-10, via real pipeline + fixture-supplied extraction
+
+`PolicyEngine`/`FinancialCalculationService`/`FraudAnalysisAgent` make
+**zero AI calls** (see the "why deterministic" rationale in
+`docs/architecture.md`), so — unlike Phase 2B — there is no live-Gemini
+verification story that adds anything these components' own behavior:
+their correctness is entirely about policy-rule/arithmetic/threshold
+logic, not AI integration. A corporate SSL-inspection proxy (Netskope)
+blocked outbound HTTPS to Google's API on this machine during this
+session (`[SSL: CERTIFICATE_VERIFY_FAILED] ... self-signed certificate in
+certificate chain`, later `CA cert does not include key usage extension`
+once a combined trust bundle was tried) — root-caused to the corporate
+root CA itself lacking proper X.509v3 key-usage extensions, not a code
+issue. Disabling SSL verification to work around it was deliberately
+**not** attempted (a security regression with no relationship to Phase 2C
+code, not something to do without explicit awareness). Phase 2B's own
+real-Gemini extraction path was already extensively verified live in the
+prior session (see "Real AI Verification (Phase 2B)" above) and is
+untouched by Phase 2C, so this gap doesn't leave the *extraction* claims
+unverified — only re-confirms that this session couldn't re-run that
+specific live-Gemini round-trip.
+
+Instead, manual verification ran the **real, unmodified `ClaimsPipeline`**
+(all 7 stages, same orchestration/trace/degrade code the live API uses)
+against TC004-TC012's official scenarios, with classifications sourced
+from `DocumentInputAdapter.to_domain()` (real ground truth from
+`test_cases.json`, the same fixture path the evaluation runner already
+uses for Phase 2A) and extraction attached directly from the same
+`test_cases.json` `content` blocks — standing in for what real Gemini
+extraction would produce on these clean, unambiguous documents (already
+verified live in Phase 2B). This is a legitimate substitute specifically
+*because* Policy/Financial/Fraud are unaffected by how the extraction
+data arrived — they only care about its shape, which is identical either
+way.
+
+Confirmed per-scenario, matching the assignment's "Important Manual
+Policy Tests" checklist:
+
+| Scenario | Case | Result |
+|----------|------|--------|
+| Clean approval | TC004 | `covered=True`, no waiting period/exclusion, `payable=1350.00` (1500 − 10% copay) |
+| Waiting period | TC005 (diabetes) | `WAITING_PERIOD_DIABETES` correctly `FAILED` (join date within waiting period) |
+| Exclusion (dental/cosmetic) | TC006 | `exclusion_applies=True`, line-item exclusion correctly separates covered vs. excluded procedures |
+| Sub-limit | TC005/TC007/TC008/TC010/TC012 | `SUB_LIMIT` correctly applied where the category sub-limit is below the eligible amount |
+| Pre-authorization | TC007 (MRI) | `PRE_AUTHORIZATION` correctly `FAILED` (high-value diagnostic test, no `PRE_AUTH_LETTER` document) — **and** the specific-condition text match for "hernia" no longer false-positives against TC007's actual "Suspected Lumbar Disc Herniation" diagnosis (see the word-boundary fix below) |
+| Per-claim limit | TC008 | `PER_CLAIM_LIMIT` correctly capping a claim above the global per-claim limit |
+| Network discount | TC010 | Discount correctly applied before sub-limit/copay (see `docs/tradeoffs.md` for the disclosed TC010 worked-example discrepancy) |
+| Excluded treatment | TC012 (obesity) | Both `WAITING_PERIOD_OBESITY_TREATMENT` and `EXCLUSION_CONDITIONS` correctly `FAILED` together |
+| Minimum claim amount | (unit tests, `TestX_MinimumClaimAmount` class) | Verified below policy minimum correctly flags |
+| Submission deadline | All TC004-TC012 | Correctly flags `SUBMISSION_DEADLINE` `FAILED` for every 2024-dated fixture evaluated against the real 2026 wall clock — expected and harmless, since this is a soft `PolicyRuleFinding`, not a pipeline gate (same reasoning as Decision 15's `LATE_SUBMISSION` scope decision) |
+| High-value / auto-manual-review | fraud unit tests (`TestHighValueThreshold`, `TestAutoManualReviewThreshold`) | Threshold crossings correctly trigger `HIGH_VALUE_CLAIM`/`AUTO_MANUAL_REVIEW_THRESHOLD_EXCEEDED` and the correct risk level |
+
+All 7 scenarios completed with `status=PROCESSING`, zero trace `FAILED`
+events, and every Policy/Financial/Fraud result populated as expected.
+
+### A real bug found during this verification (WAITING_PERIOD_HERNIA false positive)
+Running TC007's real diagnosis text, "Suspected Lumbar Disc Herniation,"
+through the real pipeline incorrectly triggered `WAITING_PERIOD_HERNIA` —
+the specific-condition key `"hernia"` was matching as a plain substring
+inside `"Herniation"`, an unrelated spinal-disc condition. Exactly the
+false-positive class the assignment's own brief warned against
+("do not accidentally classify unrelated text as diabetes"). Fixed with
+`_word_boundary_contains()` — see Decision 34 and
+`docs/tradeoffs.md` "Diagnosis/Exclusion Normalization" for the full
+account, including why dental/vision line-item matching deliberately
+keeps a different (non-word-boundary) matching strategy. Re-ran the full
+368-test backend suite after the fix (zero regressions) and re-ran this
+same fixture-based verification script — `TC007` now shows
+`PRE_AUTHORIZATION: FAILED` (the intended finding) with no
+`WAITING_PERIOD_HERNIA` false positive.
+
+### Restart persistence (Phase 2C)
+A dedicated regression test,
+`test_policy_financial_fraud_results_survive_a_database_round_trip`
+(`tests/integration/test_claims_api.py`), mirrors the same pattern Phase
+2B's `test_extraction_result_survives_a_database_round_trip` already
+established: POST a claim, then issue a **separate** `GET` — exercising a
+fresh `ClaimRepository.get_by_id()` call and `_to_domain()`'s
+rehydration of `policy_evaluation_result_json`/
+`financial_calculation_result_json`/`fraud_analysis_result_json` — and
+assert the GET's results exactly match the POST's. This proves the three
+new results were actually written to SQLite and correctly reconstructed
+back into typed Pydantic models, not merely present on the in-memory
+`Claim` object the pipeline had just produced in the same request. Passes
+alongside the full 368-test suite.
+
+**Outstanding**: a live-Gemini, live-`uvicorn`, full-restart verification
+of Phase 2C exactly mirroring Phase 2B's "stop the process, start a fresh
+one, re-fetch over HTTP" round (see "Real AI Verification (Phase 2B)" item
+4 above) was not re-run in this session, blocked by the SSL issue
+described above. The dedicated DB round-trip test above verifies the same
+underlying persistence/rehydration code path Phase 2B's live restart
+exercised (a fresh repository read, not the in-memory object) — the gap is
+specifically "not re-proven against a literally-restarted `uvicorn`
+process this session," not "persistence is unverified."
+
+---
+
 ## Known Issues
 
 1. **Gemini `response_schema` is not full JSON Schema** — see Decision 8. Extraction
@@ -978,6 +1193,43 @@ above, not just automated tests with fakes.
     from the parser itself (not just the AI) if malformed AI output turns
     out to be a real occurrence at higher volume.
 
+19. **`FinancialCalculationService`'s payable amount disagrees with two of
+    `test_cases.json`'s own worked examples (TC006, TC010)** — a
+    deliberate, disclosed trade-off, not a bug: sub-limit/per-claim-limit
+    are applied as real caps per the assignment brief's literal rule list,
+    which the worked examples appear not to have accounted for. Full
+    numeric account in `docs/tradeoffs.md` "Financial Calculation Order"
+    and Decision 35.
+
+20. **Hand-curated exclusion-keyword/condition-alias tables
+    (`_EXCLUSION_KEYWORDS`/`_CONDITION_ALIASES` in `app/policy/policy_engine.py`)
+    are not a real medical-terminology mapping** — word-boundary matching
+    (Decision 34) closes the specific false-positive class found live
+    (substring matches like "hernia"/"Herniation"), but a genuine synonym
+    with zero shared substring (e.g. an ICD code) still requires a manual
+    alias table entry. A production system would likely want a real
+    ICD-10/medical-terminology mapping layer instead. See
+    `docs/tradeoffs.md` "Diagnosis/Exclusion Normalization".
+
+21. **Several PolicyEngine checks are permanently `WARNING`, never
+    `PASSED`/`FAILED`, because the domain model has no data to verify them
+    against** — pre-existing-condition waiting period (no
+    first-diagnosed-date field independent of the current claim) and
+    session-limit checks (no cross-claim session counter exist yet). See
+    `docs/tradeoffs.md` "Ambiguous/Unverifiable Conditions". Documented
+    limitation, not a bug — the alternative would be guessing an answer
+    the data can't support.
+
+22. **A corporate SSL-inspection proxy blocked live Gemini calls during
+    this session's Phase 2C verification** — root-caused to the corporate
+    root CA lacking proper X.509v3 key-usage extensions (not a code
+    issue); worked around with real-pipeline fixture-based verification
+    instead, since Policy/Financial/Fraud make zero AI calls and Phase
+    2B's own extraction path was already verified live in the prior
+    session. See "Verification (Phase 2C)" above for the full account and
+    why a live-`uvicorn`-restart re-verification of Phase 2C specifically
+    remains outstanding for whenever this network issue is resolved.
+
 ### Resolved this session
 - ~~Node.js not installed~~ — installed; `npm install` and `npm run build` verified working.
 - ~~`tsconfig.node.json` missing `composite: true`~~ (and conflicting `noEmit: true`) —
@@ -1018,6 +1270,14 @@ above, not just automated tests with fakes.
   surfaced it: without a real key, every prior test hit the *failure* path,
   which already attached error info; nothing had exercised the *success* path
   far enough to notice the metadata was always `null`). Fixed — see Decision 21.
+- ~~`_match_specific_condition`/`_match_exclusion_keywords` naive substring
+  matching false-positived on "hernia" inside "Herniation"~~ — found live
+  during Phase 2C manual verification against TC007's real diagnosis text;
+  fixed with `_word_boundary_contains()`. See Decision 34.
+- ~~Three pre-existing pipeline early-stop blocks only marked the single
+  next stage `SKIPPED`, not all downstream stages~~ — found via a failing
+  Phase 2C regression test after adding 3 new stages; fixed with
+  `_PIPELINE_ORDER`/`_DOWNSTREAM_OF`. See Decision 36.
 
 ---
 
@@ -1044,6 +1304,11 @@ above, not just automated tests with fakes.
 19. **NEVER add a `null`/nullable-union field to an extraction schema** — Gemini's `response_schema` subset doesn't reliably support it (Decision 8). Use the established sentinel convention instead (`""` strings/dates/amounts, `[]` lists, `"UNCLEAR"` tri-state) and add the corresponding `_empty_to_none`/`_to_decimal`/`_to_tristate_bool` validator in `app/domain/extraction.py`.
 20. **NEVER make `document_extraction_agent` a required `ClaimsPipeline` constructor argument** — it must stay `Optional[...] = None` (Decision 30) so the evaluation runner and any test that predates Phase 2B keeps working unmodified.
 21. **NEVER let `ClaimValidationAgent` resolve a `Member` and then discard it** — this was the root cause of the Phase 2A identity-validation gap (see that section above). The resolved `Member` must keep flowing through `ValidationResult.member` → `Claim.member` → `CrossDocumentValidationAgent`'s `member` parameter (Decision 31). If a future refactor changes how member resolution works, keep this propagation path intact or re-introduce the exact bug that was just fixed.
+22. **NEVER let `PolicyEngine`/`FinancialCalculationService`/`FraudAnalysisAgent` set a terminal `claim.status`** — these three are soft-fail by design (Decision 32); a failure must leave the corresponding `claim.*_result` field `None` and let the pipeline continue, never `BLOCKED`/early-stop. Final decision generation belongs to Phase 2D's `DecisionGenerationAgent`, not these components.
+23. **NEVER use plain substring containment (`phrase in text`) for diagnosis/condition text matching in `PolicyEngine`** — this produced a real false positive ("hernia" matching inside "Herniation", Decision 34). Use `_word_boundary_contains()` for any new free-text clinical-text matching; plain substring matching stays reserved for the short, closed-vocabulary dental/vision line-item case where it was deliberately kept.
+24. **NEVER add a new pipeline stage without adding it to `_PIPELINE_ORDER`** (`app/pipeline/pipeline.py`) — the early-stop blocks' `SKIPPED` completeness and `_degrade()`'s exception-path skip list both derive from this one list via `_DOWNSTREAM_OF` (Decision 36). Skipping this step silently reintroduces the trace-completeness bug that was just fixed.
+25. **NEVER let `FinancialCalculationService` silently substitute an AI-extracted bill total for the claimed/eligible amount** — a mismatch beyond the reconciliation tolerance must become a `warnings` entry naming both values, never an automatic correction. See `docs/tradeoffs.md` "Bill Amount Reconciliation".
+26. **NEVER merge `FraudAnalysisResult.ai_risk_score` into `deterministic_thresholds_triggered`** — even once an AI-assisted signal is eventually implemented, the two must stay distinguishable so a human reviewer can always tell "the policy-defined threshold was crossed" from "the model thought this looked suspicious." See Decision 33/`docs/architecture.md`'s fraud-architecture section.
 
 ---
 
@@ -1121,32 +1386,77 @@ answers "what does the document say," never "is this covered."
 
 ---
 
-## Next Phase — Phase 3
+## Phase 2C Summary (complete)
+
+Built three more deterministic pipeline stages, all soft-fail (never gate
+the claim — Decision 32), all zero-AI-call: `PolicyEngine`
+(`app/policy/policy_engine.py`, the deterministic authority on coverage,
+limits, waiting periods, exclusions, pre-authorization, network status —
+full rule list in `docs/component-contracts.md`), `FinancialCalculationService`
+(`app/services/financial_calculation_service.py`, pure `Decimal`
+arithmetic in a fixed calculation order — claimed/eligible amount →
+network discount → sub-limit cap → per-claim-limit cap → remaining
+annual-OPD-allowance cap → copay → payable amount), and
+`FraudAnalysisAgent` (`app/agents/fraud_analysis_agent.py`, deterministic
+same-day/monthly/high-value/auto-manual-review thresholds read from
+`policy_terms.json`, with `ai_risk_score` deliberately reserved but unused
+this phase — Decision 33). `ClaimsPipeline` gained a new
+`_run_soft_stage()` helper and a `_PIPELINE_ORDER`/`_DOWNSTREAM_OF`
+mapping that also fixed a real trace-skip completeness bug found via TDD
+(see above). Persisted as three simple JSON columns on `ClaimORM`
+(`policy_evaluation_result_json`/`financial_calculation_result_json`/
+`fraud_analysis_result_json`), surfaced through `ClaimResponse`, and
+rendered in `ClaimDetail.tsx` as three new sections (Policy Evaluation,
+Financial Calculation, Fraud Analysis). 66 new backend tests (36 policy +
+16 financial + 14 fraud unit tests, plus integration tests covering the
+full pipeline reaching all three stages, the Phase 2A identity fix still
+early-stopping before them, and graceful degradation on a `PolicyEngine`
+failure) plus 3 new frontend tests, all passing alongside the full
+pre-existing suite (368 backend / 38 frontend total). Manually verified
+against the real `ClaimsPipeline` for TC004-TC012's official scenarios
+(waiting period, exclusion, sub-limit, pre-auth, per-claim limit, network
+discount, excluded treatment, minimum claim amount, submission deadline,
+high-value/auto-manual-review) — see "Verification (Phase 2C)" above,
+including a real bug (word-boundary false positive on "hernia" inside
+"Herniation") found and fixed during that verification, and a dedicated
+restart-persistence regression test.
+
+Explicitly NOT implemented in Phase 2C (as scoped, per this phase's own
+brief): `DecisionGenerationAgent` (no `APPROVED`/`PARTIAL`/`REJECTED`/
+`MANUAL_REVIEW` synthesis), `ExplanationAgent` (no member-facing
+explanation), and no AI-assisted fraud signal (deterministic-only, by
+design this phase — see Decision 33). `Claim.decision` stays `None`
+through this entire phase too — `PolicyEngine`/`FinancialCalculationService`/
+`FraudAnalysisAgent` answer "what does the policy say / what would be
+payable / are there fraud signals," never "is this claim approved."
+
+---
+
+## Next Phase — Phase 2D
 
 ### Goal
-Implement policy evaluation and the final decision, using
-`ClaimValidationAgent`/`DocumentVerificationAgent`/`CrossDocumentValidationAgent`/
-`DocumentExtractionAgent`/`ClaimsPipeline` from Phases 2A/2B as the
-foundation everything else builds on top of. The extracted structured data
-(diagnosis, line items, amounts, dates, doctor details — now real, typed,
-and persisted) is exactly what `PolicyEngine`/`FinancialCalculationService`
-need as input; Phase 3 consumes `claim.extraction_result`, it doesn't need
-to re-derive anything from raw documents.
+Implement the final claim decision, using `ClaimValidationAgent`/
+`DocumentVerificationAgent`/`CrossDocumentValidationAgent`/
+`DocumentExtractionAgent`/`PolicyEngine`/`FinancialCalculationService`/
+`FraudAnalysisAgent`/`ClaimsPipeline` from Phases 2A/2B/2C as the
+foundation everything else builds on top of. `claim.policy_evaluation_result`/
+`financial_calculation_result`/`fraud_analysis_result` are exactly what a
+`DecisionGenerationAgent` needs as input — Phase 2D consumes these
+structured results, it doesn't need to re-derive anything from raw policy
+rules or documents.
 
 ### Components to Build
-1. `PolicyEngine` (fill in the existing stub in `app/policy/policy_engine.py`, built on top of `PolicyRepository`) — deterministic coverage, sub-limits, co-pay, network discount, waiting periods, exclusions, pre-authorization, all from `policy_terms.json`
-2. `FraudAnalysisAgent` — same-day claim patterns, high-value flags, monthly claim limits (thresholds already defined in `policy_terms.json`'s `fraud_thresholds`)
-3. `FinancialCalculationService` — copay, network discount, limits (Decimal arithmetic, no LLM); TC010 specifically tests discount-before-copay ordering
-4. `DecisionGenerationAgent` — synthesise `APPROVED`/`PARTIAL`/`REJECTED`/`MANUAL_REVIEW` (`ClaimDecision` already exists in `app/domain/models.py` from Phase 0, unused until now)
-5. `ExplanationAgent` — member-facing explanation of the decision
-6. Extend `ClaimsPipeline` with these stages after document extraction, following the same `_run_stage`/early-stop/graceful-degradation pattern (and the same "optional agent, defaults to skip" backward-compatibility trick from Decision 30, if warranted)
-7. Extend `POST /api/v1/claims`'s response with decision fields once they exist
-8. Extend `ClaimSubmission`/`ClaimDetail` pages to show the decision, financial breakdown, and explanation
+1. `DecisionGenerationAgent` — synthesise `APPROVED`/`PARTIAL`/`REJECTED`/`MANUAL_REVIEW` from `claim.policy_evaluation_result`/`financial_calculation_result`/`fraud_analysis_result` (`ClaimDecision` already exists in `app/domain/models.py` from Phase 0, unused until now)
+2. `ExplanationAgent` — member-facing explanation of the decision, built from the same structured findings (never a hardcoded per-test-case string, matching the existing "always build from structured results" rule — see Must-Not-Break #17)
+3. Extend `ClaimsPipeline` with these stages after fraud analysis, following the same `_run_stage`/early-stop/graceful-degradation pattern; decide whether the decision stage is hard-stop (it's the terminal outcome) or follows a new pattern — this is the first genuinely terminal stage since Phase 2A
+4. Extend `POST /api/v1/claims`'s response with decision/explanation fields once they exist
+5. Extend `ClaimSubmission`/`ClaimDetail` pages to show the final decision and explanation prominently
 
-### Also required for Phase 3
-- ORM model for `decisions` (or extend `claims` — TBD when the shape is known)
-- Run all 12 test cases (not just TC001-TC003) against the real Gemini API using real uploaded documents; write `docs/eval-report.md` — Phase 3 is the first phase that can actually attempt TC004-TC012, since they need a real decision to check against
-- Consider Alembic (or similar) migrations before further domain-model column changes — see Known Issue 13 (now also relevant to Phase 2B's own column additions)
+### Also required for Phase 2D
+- ORM column(s) for the decision (or a `decisions` table — TBD when the shape is known)
+- Run all 12 test cases (not just TC001-TC003) against the real Gemini API using real uploaded documents; write `docs/eval-report.md` — Phase 2D is the first phase that can actually attempt TC004-TC012 end-to-end, since they need a real decision to check against
+- Re-attempt a live-`uvicorn`-restart verification of Phase 2C once the SSL/corporate-proxy issue (Known Issue 22) is resolved, alongside Phase 2D's own live verification
+- Consider Alembic (or similar) migrations before further domain-model column changes — see Known Issue 13 (now also relevant to Phase 2C's own column additions)
 - An S3 (or equivalent) `DocumentStorage` implementation before any horizontally-scaled deployment — see Known Issue 14
 - Consider parallelizing per-document AI calls (classification and extraction) and/or a bounded retry for transient failures — see Known Issues 15/16
 - Update this document

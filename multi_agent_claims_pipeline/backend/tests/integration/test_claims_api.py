@@ -241,6 +241,17 @@ async def test_submit_claim_that_clears_phase_2a(client_factory):
     doc_extractions = {d["file_id"]: d["extraction"] for d in result["documents"]}
     assert all(doc_extractions.values())  # every document has its extraction attached too
 
+    # Phase 2C: PolicyEngine/FinancialCalculationService/FraudAnalysisAgent
+    # make no AI calls, so they run automatically over real HTTP once
+    # extraction succeeds — api/deps.py always wires them into the pipeline.
+    assert result["policy_evaluation_result"] is not None
+    assert result["policy_evaluation_result"]["coverage_category"] == "CONSULTATION"
+    assert result["financial_calculation_result"] is not None
+    assert result["financial_calculation_result"]["payable_amount"] is not None
+    assert result["fraud_analysis_result"] is not None
+    assert result["fraud_analysis_result"]["risk_level"] in ("LOW", "MEDIUM", "HIGH")
+    assert "decision" not in result  # Phase 2D not implemented — no final-decision field exists yet
+
 
 @pytest.mark.anyio
 async def test_submit_claim_tc002_unreadable_requests_resubmission(client_factory):
@@ -330,6 +341,12 @@ async def test_submit_claim_member_identity_mismatch_blocks(client_factory):
     assert "Rajesh Kumar" in result["user_message"]
     assert result["cross_document_validation_result"]["status"] == "BLOCKED"
 
+    # Phase 2C regression guard (assignment section 36): Policy/Financial/
+    # Fraud must never run for a claim that stopped at Phase 2A.
+    assert result["policy_evaluation_result"] is None
+    assert result["financial_calculation_result"] is None
+    assert result["fraud_analysis_result"] is None
+
     claim_id = result["claim_id"]
     trace_response = await client.get(f"/api/v1/claims/{claim_id}/trace")
     trace = trace_response.json()
@@ -338,6 +355,14 @@ async def test_submit_claim_member_identity_mismatch_blocks(client_factory):
     completed = next(e for e in cross_doc_events if e["event_type"] == "COMPLETED")
     assert completed["metadata"]["status"] == "BLOCKED"
     assert completed["metadata"]["expected_member_name"] == "Rajesh Kumar"
+
+    policy_events = [e for e in trace["events"] if e["component"] == "POLICY_ENGINE"]
+    assert len(policy_events) == 1
+    assert policy_events[0]["event_type"] == "SKIPPED"
+    financial_events = [e for e in trace["events"] if e["component"] == "FINANCIAL_CALCULATION"]
+    assert financial_events[0]["event_type"] == "SKIPPED"
+    fraud_events = [e for e in trace["events"] if e["component"] == "FRAUD_ANALYSIS"]
+    assert fraud_events[0]["event_type"] == "SKIPPED"
 
 
 @pytest.mark.anyio
@@ -478,6 +503,58 @@ async def test_extraction_result_survives_a_database_round_trip(client_factory):
     assert bill_doc["extraction"]["extraction"]["hospital_name"] == "City Clinic"
     assert bill_doc["extraction"]["extraction"]["total"] == "1500.00"
     assert "storage_reference" not in bill_doc
+
+
+@pytest.mark.anyio
+async def test_policy_financial_fraud_results_survive_a_database_round_trip(client_factory):
+    """
+    Restart-persistence guard for Phase 2C, mirroring
+    test_extraction_result_survives_a_database_round_trip above: the POST
+    response is built from the in-memory Claim the pipeline just produced,
+    which would pass even if ClaimRepository never persisted
+    policy_evaluation_result_json/financial_calculation_result_json/
+    fraud_analysis_result_json correctly. A separate GET — a fresh
+    ClaimRepository.get_by_id() call, exercising _to_domain()'s
+    rehydration of these three JSON columns — is what actually proves
+    the results survive a server restart.
+    """
+    data = {
+        "member_id": "EMP001",
+        "policy_id": "PLUM_GHI_2024",
+        "claim_category": "CONSULTATION",
+        "treatment_date": "2024-11-01",
+        "claimed_amount": "1500",
+    }
+    files = [
+        ("documents", ("rx.jpg", JPEG_BYTES, "image/jpeg")),
+        ("documents", ("bill.pdf", PDF_BYTES, "application/pdf")),
+    ]
+    ai_responses = [
+        {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.94},
+        {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.91},
+        PRESCRIPTION_EXTRACTION_RESPONSE,
+        HOSPITAL_BILL_EXTRACTION_RESPONSE,
+    ]
+    client = await client_factory(ai_responses)
+    submit_response = await client.post("/api/v1/claims", data=data, files=files)
+    submitted = submit_response.json()
+    claim_id = submitted["claim_id"]
+
+    get_response = await client.get(f"/api/v1/claims/{claim_id}")
+    assert get_response.status_code == 200
+    result = get_response.json()
+
+    assert result["policy_evaluation_result"] is not None
+    assert result["policy_evaluation_result"] == submitted["policy_evaluation_result"]
+    assert result["policy_evaluation_result"]["coverage_category"] == "CONSULTATION"
+
+    assert result["financial_calculation_result"] is not None
+    assert result["financial_calculation_result"] == submitted["financial_calculation_result"]
+    assert result["financial_calculation_result"]["payable_amount"] is not None
+
+    assert result["fraud_analysis_result"] is not None
+    assert result["fraud_analysis_result"] == submitted["fraud_analysis_result"]
+    assert result["fraud_analysis_result"]["risk_level"] in ("LOW", "MEDIUM", "HIGH")
 
 
 @pytest.mark.anyio

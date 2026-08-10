@@ -49,6 +49,13 @@ class ClaimORM(Base):
     # overall confidence) — the heavy per-document payload lives on
     # ClaimDocumentORM.extraction_json instead (see that model's docstring).
     extraction_summary_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    # Phase 2C: all three are claim-level (not per-document) results, same
+    # granularity as validation/document-verification/cross-document above
+    # — a single JSON blob each, read as a whole with the claim, never
+    # queried field-by-field. See docs/component-contracts.md.
+    policy_evaluation_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    financial_calculation_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    fraud_analysis_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

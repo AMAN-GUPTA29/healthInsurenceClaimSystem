@@ -9,7 +9,15 @@ import { useParams, Link } from 'react-router-dom'
 import { claimsApi, APIClientError } from '../services/api'
 import { useClaimTrace } from '../hooks/useClaimTrace'
 import { TraceViewer } from '../components/TraceViewer'
-import type { ClaimResponse, ClaimStatus, DocumentExtractionResult } from '../types'
+import type {
+  ClaimResponse,
+  ClaimStatus,
+  DocumentExtractionResult,
+  FinancialCalculationResult,
+  FraudAnalysisResult,
+  PolicyEvaluationResult,
+  PolicyRuleStatus,
+} from '../types'
 
 const CARD: React.CSSProperties = {
   background: 'rgba(30, 41, 59, 0.6)',
@@ -369,6 +377,180 @@ function DocList({ title, items }: { title: string; items: string[] }) {
   )
 }
 
+const RULE_STATUS_STYLE: Record<PolicyRuleStatus, { fg: string; icon: string }> = {
+  PASSED: { fg: '#86efac', icon: '✓' },
+  FAILED: { fg: '#fca5a5', icon: '✕' },
+  WARNING: { fg: '#fcd34d', icon: '⚠' },
+  NOT_APPLICABLE: { fg: '#64748b', icon: '○' },
+}
+
+function Badge({ text, tone }: { text: string; tone: 'good' | 'bad' | 'neutral' | 'warn' }) {
+  const colors = {
+    good: { bg: 'rgba(34,197,94,0.12)', fg: '#86efac', border: 'rgba(34,197,94,0.3)' },
+    bad: { bg: 'rgba(239,68,68,0.12)', fg: '#fca5a5', border: 'rgba(239,68,68,0.3)' },
+    warn: { bg: 'rgba(245,158,11,0.12)', fg: '#fcd34d', border: 'rgba(245,158,11,0.3)' },
+    neutral: { bg: 'rgba(100,116,139,0.12)', fg: '#94a3b8', border: 'rgba(100,116,139,0.3)' },
+  }[tone]
+  return (
+    <span
+      style={{
+        background: colors.bg, color: colors.fg, border: `1px solid ${colors.border}`,
+        borderRadius: '6px', padding: '3px 10px', fontSize: '12px', fontWeight: 700,
+      }}
+    >
+      {text}
+    </span>
+  )
+}
+
+/** Policy Evaluation section — coverage, key checks, and an
+ * expandable full rule list. Never raw JSON as the primary view. */
+function PolicySection({ result }: { result: PolicyEvaluationResult }) {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+        <Badge text={result.covered ? 'Covered' : 'Not Covered'} tone={result.covered ? 'good' : 'bad'} />
+        {result.waiting_period_applies && <Badge text="Waiting Period Applies" tone="bad" />}
+        {result.exclusion_applies && <Badge text="Exclusion Applies" tone="bad" />}
+        {result.requires_pre_authorization && (
+          <Badge
+            text={result.pre_authorization_provided ? 'Pre-Auth Provided' : 'Pre-Auth Missing'}
+            tone={result.pre_authorization_provided ? 'good' : 'bad'}
+          />
+        )}
+        {result.is_network_hospital === true && <Badge text="Network Hospital" tone="good" />}
+        {result.is_network_hospital === false && <Badge text="Non-Network" tone="neutral" />}
+        {result.is_network_hospital === undefined && <Badge text="Network Status Unknown" tone="warn" />}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', fontSize: '12px', marginBottom: '14px' }}>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Sub-limit</div>
+          <div style={{ color: '#cbd5e1' }}>{fmtAmount(result.sub_limit)}</div>
+        </div>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Per-Claim Limit</div>
+          <div style={{ color: '#cbd5e1' }}>{fmtAmount(result.per_claim_limit)}</div>
+        </div>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Copay</div>
+          <div style={{ color: '#cbd5e1' }}>{result.copay_percent}%</div>
+        </div>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Network Discount</div>
+          <div style={{ color: '#cbd5e1' }}>{result.network_discount_percent}%</div>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        data-testid="toggle-policy-rules"
+        onClick={() => setExpanded(v => !v)}
+        style={{ background: 'none', border: 'none', color: '#a5b4fc', fontSize: '12px', fontWeight: 600, cursor: 'pointer', padding: 0 }}
+      >
+        {expanded ? '▾' : '▸'} Rules checked ({result.passed_rules.length} passed, {result.failed_rules.length} failed)
+      </button>
+      {expanded && (
+        <div data-testid="policy-rules-list" style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          {result.findings.map((f, i) => {
+            const s = RULE_STATUS_STYLE[f.status]
+            return (
+              <div key={`${f.rule}-${i}`} style={{ fontSize: '12px', color: '#cbd5e1' }}>
+                <span style={{ color: s.fg }}>{s.icon}</span>{' '}
+                <strong>{f.rule.replace(/_/g, ' ')}</strong>
+                <span style={{ color: '#64748b' }}> — {f.evidence}</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Financial Calculation section — headline amounts from real backend
+ * values only; the frontend never computes these. */
+function FinancialSection({ result }: { result: FinancialCalculationResult }) {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '14px', marginBottom: '14px' }}>
+        {[
+          ['Claimed', result.claimed_amount],
+          ['Eligible', result.eligible_amount],
+          ['Copay', result.copay_amount],
+          ['Payable', result.payable_amount],
+        ].map(([label, value]) => (
+          <div key={label as string}>
+            <div style={{ color: '#64748b', fontSize: '11px', textTransform: 'uppercase', marginBottom: '4px' }}>{label}</div>
+            <div style={{ color: label === 'Payable' ? '#86efac' : '#e2e8f0', fontSize: '18px', fontWeight: 700 }}>
+              {fmtAmount(value as number)}
+            </div>
+          </div>
+        ))}
+      </div>
+      {result.warnings.length > 0 && (
+        <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '6px', padding: '8px 10px', marginBottom: '10px' }}>
+          {result.warnings.map((w, i) => (
+            <div key={i} data-testid="financial-warning" style={{ fontSize: '12px', color: '#fcd34d' }}>⚠ {w}</div>
+          ))}
+        </div>
+      )}
+      <button
+        type="button"
+        data-testid="toggle-financial-steps"
+        onClick={() => setExpanded(v => !v)}
+        style={{ background: 'none', border: 'none', color: '#a5b4fc', fontSize: '12px', fontWeight: 600, cursor: 'pointer', padding: 0 }}
+      >
+        {expanded ? '▾' : '▸'} Calculation steps
+      </button>
+      {expanded && (
+        <ol data-testid="financial-steps-list" style={{ margin: '10px 0 0', paddingLeft: '18px', color: '#cbd5e1', fontSize: '12px' }}>
+          {result.calculation_steps.map((step, i) => (
+            <li key={i} style={{ marginBottom: '4px' }}>{step}</li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+/** Fraud Analysis section — risk level, flags, and the deterministic
+ * counts that drove them. */
+function FraudSection({ result }: { result: FraudAnalysisResult }) {
+  const riskTone = result.risk_level === 'HIGH' ? 'bad' : result.risk_level === 'MEDIUM' ? 'warn' : 'good'
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+        <Badge text={`${result.risk_level} Risk`} tone={riskTone} />
+        {result.is_high_value && <Badge text="High Value" tone="warn" />}
+        {result.requires_manual_review && <Badge text="Manual Review Recommended" tone="bad" />}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px', fontSize: '12px', marginBottom: '14px' }}>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Same-Day Claims</div>
+          <div style={{ color: '#cbd5e1' }}>{result.same_day_claim_count}</div>
+        </div>
+        <div>
+          <div style={{ color: '#64748b', marginBottom: '2px' }}>Monthly Claims</div>
+          <div style={{ color: '#cbd5e1' }}>{result.monthly_claim_count}</div>
+        </div>
+      </div>
+      {result.flags.length > 0 && (
+        <div data-testid="fraud-flags" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          {result.flags.map((f, i) => (
+            <div key={i} style={{ fontSize: '12px', color: '#fecaca' }}>
+              ⚠ <strong>{f.code.replace(/_/g, ' ')}</strong>
+              <span style={{ color: '#94a3b8' }}> — {f.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ClaimDetail() {
   const { claimId } = useParams<{ claimId: string }>()
   const [claim, setClaim] = useState<ClaimResponse | null>(null)
@@ -512,6 +694,33 @@ export function ClaimDetail() {
           />
         </div>
       </div>
+
+      {claim.policy_evaluation_result && (
+        <div style={CARD}>
+          <h2 style={{ margin: '0 0 16px', fontSize: '15px', fontWeight: 600, color: '#e2e8f0' }}>
+            Policy Evaluation
+          </h2>
+          <PolicySection result={claim.policy_evaluation_result} />
+        </div>
+      )}
+
+      {claim.financial_calculation_result && (
+        <div style={CARD}>
+          <h2 style={{ margin: '0 0 16px', fontSize: '15px', fontWeight: 600, color: '#e2e8f0' }}>
+            Financial Calculation
+          </h2>
+          <FinancialSection result={claim.financial_calculation_result} />
+        </div>
+      )}
+
+      {claim.fraud_analysis_result && (
+        <div style={CARD}>
+          <h2 style={{ margin: '0 0 16px', fontSize: '15px', fontWeight: 600, color: '#e2e8f0' }}>
+            Fraud Analysis
+          </h2>
+          <FraudSection result={claim.fraud_analysis_result} />
+        </div>
+      )}
 
       <div style={CARD}>
         <h2 style={{ margin: '0 0 16px', fontSize: '15px', fontWeight: 600, color: '#e2e8f0' }}>

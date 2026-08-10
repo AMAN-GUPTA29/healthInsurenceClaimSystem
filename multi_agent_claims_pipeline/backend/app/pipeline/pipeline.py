@@ -1,20 +1,22 @@
 """
-Claims Pipeline — Phase 2A: claim validation, document verification,
-cross-document validation, and early stopping. No policy/decision logic
-yet — see app/policy/policy_engine.py and this module's own docstring
-history for what's still planned.
+Claims Pipeline — orchestrates claim validation, document verification,
+cross-document (member-identity) validation, document extraction, policy
+evaluation, financial calculation, and fraud analysis, with early stopping
+on Phase 2A's stages and graceful degradation everywhere. No final
+decision logic yet — see app/agents/ (planned, Phase 2D) for what's still
+missing.
 
 Planned pipeline stages (full, across all phases):
-    1.  ClaimValidationAgent         — ✅ Phase 2A
-    2.  DocumentVerificationAgent    — ✅ Phase 2A
-    3.  CrossDocumentValidationAgent — ✅ Phase 2A (patient-identity only)
-    4.  DocumentExtractionAgent      — ✅ Phase 2B (structured data per document type)
-    5.  PolicyEvaluationEngine       — (planned) deterministic policy rules
-    6.  FraudAnalysisAgent           — (planned)
-    7.  FinancialCalculationService  — (planned) copay, network discount, limits
-    8.  DecisionGenerationAgent      — (planned)
-    9.  ExplanationAgent             — (planned)
-    10. TraceRecorder                — ✅ Phase 1 (TraceService, injected below)
+    1.  ClaimValidationAgent          — ✅ Phase 2A
+    2.  DocumentVerificationAgent     — ✅ Phase 2A
+    3.  CrossDocumentValidationAgent  — ✅ Phase 2A (patient-identity + member-identity, Phase 2A fix)
+    4.  DocumentExtractionAgent       — ✅ Phase 2B (structured data per document type)
+    5.  PolicyEngine                  — ✅ Phase 2C (deterministic policy rules)
+    6.  FinancialCalculationService   — ✅ Phase 2C (copay, network discount, limits)
+    7.  FraudAnalysisAgent            — ✅ Phase 2C (deterministic fraud thresholds)
+    8.  DecisionGenerationAgent       — (planned, Phase 2D)
+    9.  ExplanationAgent              — (planned, Phase 2D)
+    10. TraceRecorder                 — ✅ Phase 1 (TraceService, injected below)
 
 Phase 2B note — why extraction runs after cross-document validation, not
 before or in parallel: extraction is the most expensive stage (real
@@ -25,6 +27,25 @@ that would have stopped anyway (wrong document, unreadable document,
 patient mismatch) never pays that cost — see docs/architecture.md
 "Document Extraction" for the full rationale.
 
+Phase 2C note — why Policy/Financial/Fraud use a different failure model
+than stages 1-3: stages 1-3 are early-stop *gates* (an invalid claim or a
+document problem means there's nothing useful to do next). Policy
+evaluation, financial calculation, and fraud analysis are not gates — they
+are *findings* for Phase 2D's DecisionGenerationAgent to weigh (a FAILED
+policy rule doesn't mean "stop the pipeline", it means "tell Phase 2D
+this rule failed"). So a genuine failure in one of these three stages
+(AI/infra problem — none of them call AI in this phase, but the pattern
+holds for any unexpected exception) is handled with `_run_soft_stage`:
+record FAILED in the trace, leave the corresponding `claim.*_result` field
+`None` (never a guessed/fabricated result — see docs/AI_HANDOFF.md
+invariant re: PolicyEngine/FinancialCalculationService failure), and
+*continue* to the next stage rather than blocking the claim. Financial
+Calculation is the one dependency in this trio — it needs
+PolicyEvaluationResult as input, so it's skipped (not attempted) if Policy
+didn't produce one; Fraud Analysis has no such dependency and always
+attempts to run independently, since "was this member submitting
+suspiciously many claims" doesn't require a payable-amount figure.
+
 Design — how early stopping is represented in the trace:
 Each stage's own STARTED/COMPLETED/FAILED pair reflects whether the agent
 *ran without error* — a document-verification agent that correctly finds
@@ -33,20 +54,22 @@ COMPLETED event (with the verdict captured in its metadata), never FAILED.
 FAILED is reserved for genuine infrastructure/AI problems (see
 _run_stage's except-block). Skipped downstream stages get an explicit
 SKIPPED event. Exactly one PIPELINE-component event summarizes the run's
-outcome: COMPLETED (reached the end of what Phase 2A implements), WARNING
+outcome: COMPLETED (reached the end of what's implemented), WARNING
 (stopped early for an expected business reason), or FAILED (stopped
-because a stage genuinely errored). Full rationale in docs/architecture.md.
+because a Phase 2A/2B stage genuinely errored). Full rationale in
+docs/architecture.md.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Coroutine, Dict, Optional, TypeVar
+from typing import Any, Callable, Coroutine, Dict, Optional, Tuple, TypeVar
 
 from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
 from app.agents.document_extraction_agent import DocumentExtractionAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
+from app.agents.fraud_analysis_agent import FraudAnalysisAgent
 from app.domain.models import Claim, ClaimStatus, DocumentProcessingStatus
 from app.domain.trace import TraceComponent
 from app.domain.verification import (
@@ -54,30 +77,66 @@ from app.domain.verification import (
     DocumentClassification,
     DocumentVerificationStatus,
 )
+from app.policy.policy_engine import PolicyEngine
+from app.services.financial_calculation_service import FinancialCalculationService
 from app.tracing.service import TraceService
 
 T = TypeVar("T")
 
+# Every stage that comes after a given stage, in pipeline order — used by
+# `_degrade()` to mark the full remainder SKIPPED in the trace when an
+# earlier stage genuinely fails, so an ops user sees explicit SKIPPED
+# events for every downstream component rather than silent absence.
+_PIPELINE_ORDER = [
+    TraceComponent.CLAIM_VALIDATION,
+    TraceComponent.DOCUMENT_VERIFICATION,
+    TraceComponent.CROSS_DOCUMENT_VALIDATION,
+    TraceComponent.DOCUMENT_EXTRACTION,
+    TraceComponent.POLICY_ENGINE,
+    TraceComponent.FINANCIAL_CALCULATION,
+    TraceComponent.FRAUD_ANALYSIS,
+]
+_DOWNSTREAM_OF = {
+    component: _PIPELINE_ORDER[i + 1 :] for i, component in enumerate(_PIPELINE_ORDER)
+}
 
-def _final_user_message(claim: Claim) -> str:
+
+def _final_user_message(
+    claim: Claim, *, policy_failed: bool, financial_failed: bool, fraud_failed: bool
+) -> str:
     """
     The member-facing message once every configured stage has run without a
-    hard stop. Built from the structured extraction_result the same way
+    hard stop. Built from the structured results the same way
     DocumentVerificationAgent builds its own message from structured
     results (see docs/AI_HANDOFF.md invariant #17) — never a hardcoded
     per-case string.
     """
-    result = claim.extraction_result
-    if result is None:
-        return "All early checks passed. Policy evaluation is not yet implemented."
-    if result.has_failures:
+    extraction_result = claim.extraction_result
+    notes = []
+    if extraction_result is not None and extraction_result.has_failures:
+        notes.append(f"{len(extraction_result.failures)} document(s) could not be fully processed")
+    if policy_failed:
+        notes.append("policy evaluation could not be completed")
+    if financial_failed:
+        notes.append("the financial calculation could not be completed")
+    if fraud_failed:
+        notes.append("fraud analysis could not be completed")
+
+    if notes:
         return (
-            "All early checks passed. We extracted the information we could from your "
-            f"documents, but {len(result.failures)} document(s) could not be fully processed "
-            "— a team member may need to review this claim manually. Policy evaluation is "
-            "not yet implemented."
+            "All early checks passed, but " + "; ".join(notes) + " — a team member may need to "
+            "review this claim manually. A final decision has not yet been made."
         )
-    return "All early checks passed and document information was extracted. Policy evaluation is not yet implemented."
+    return "All early checks passed. Policy, financial, and fraud analysis are complete. A final decision has not yet been made."
+
+
+async def _run_financial_calc(service: FinancialCalculationService, claim: Claim, policy_result) -> Any:
+    """FinancialCalculationService.calculate() is a plain synchronous
+    method (purely deterministic Decimal arithmetic, no I/O — see its own
+    module docstring) — this thin async wrapper is only here so it fits
+    `_run_soft_stage`'s `coro_factory` interface alongside the genuinely
+    async Policy/Fraud stages."""
+    return service.calculate(claim, policy_result)
 
 
 class ClaimsPipeline:
@@ -90,15 +149,22 @@ class ClaimsPipeline:
         document_verification_agent: DocumentVerificationAgent,
         cross_document_validation_agent: CrossDocumentValidationAgent,
         document_extraction_agent: Optional[DocumentExtractionAgent] = None,
+        policy_engine: Optional[PolicyEngine] = None,
+        financial_calculation_service: Optional[FinancialCalculationService] = None,
+        fraud_analysis_agent: Optional[FraudAnalysisAgent] = None,
     ) -> None:
         self._claim_validation_agent = claim_validation_agent
         self._document_verification_agent = document_verification_agent
         self._cross_document_validation_agent = cross_document_validation_agent
-        # Optional, defaulting to None, so every existing caller that builds
-        # a ClaimsPipeline without an extraction agent (evaluation runner,
-        # existing tests) keeps working unmodified — DOCUMENT_EXTRACTION is
-        # simply recorded SKIPPED rather than attempted. See `run()`.
+        # All optional, defaulting to None (same backward-compatibility
+        # trick as document_extraction_agent, Decision 30), so every
+        # existing caller that builds a ClaimsPipeline without them
+        # (evaluation runner, existing tests) keeps working unmodified —
+        # the corresponding stage is simply recorded SKIPPED. See `run()`.
         self._document_extraction_agent = document_extraction_agent
+        self._policy_engine = policy_engine
+        self._financial_calculation_service = financial_calculation_service
+        self._fraud_analysis_agent = fraud_analysis_agent
 
     async def run(
         self,
@@ -140,7 +206,7 @@ class ClaimsPipeline:
         except Exception as exc:
             return await self._degrade(
                 claim, tracer, TraceComponent.CLAIM_VALIDATION, exc, t0,
-                remaining=[TraceComponent.DOCUMENT_VERIFICATION, TraceComponent.CROSS_DOCUMENT_VALIDATION],
+                remaining=_DOWNSTREAM_OF[TraceComponent.CLAIM_VALIDATION],
             )
         claim.validation_result = validation_result
         # Identity-fix: carry the Member ClaimValidationAgent already
@@ -153,12 +219,8 @@ class ClaimsPipeline:
 
         if not validation_result.valid:
             reason = "; ".join(e.message for e in validation_result.errors) or "claim validation failed"
-            await tracer.skipped(
-                TraceComponent.DOCUMENT_VERIFICATION, "Skipped — claim validation failed"
-            )
-            await tracer.skipped(
-                TraceComponent.CROSS_DOCUMENT_VALIDATION, "Skipped — claim validation failed"
-            )
+            for component in _DOWNSTREAM_OF[TraceComponent.CLAIM_VALIDATION]:
+                await tracer.skipped(component, "Skipped — claim validation failed")
             await tracer.warning(
                 TraceComponent.PIPELINE,
                 f"Stopped: {reason}",
@@ -193,16 +255,16 @@ class ClaimsPipeline:
         except Exception as exc:
             return await self._degrade(
                 claim, tracer, TraceComponent.DOCUMENT_VERIFICATION, exc, t0,
-                remaining=[TraceComponent.CROSS_DOCUMENT_VALIDATION],
+                remaining=_DOWNSTREAM_OF[TraceComponent.DOCUMENT_VERIFICATION],
             )
         claim.document_verification_result = doc_result
         self._apply_classifications(claim, doc_result.classifications)
 
         if doc_result.status != DocumentVerificationStatus.PASS:
-            await tracer.skipped(
-                TraceComponent.CROSS_DOCUMENT_VALIDATION,
-                f"Skipped — document verification {doc_result.status.value.lower()}",
-            )
+            for component in _DOWNSTREAM_OF[TraceComponent.DOCUMENT_VERIFICATION]:
+                await tracer.skipped(
+                    component, f"Skipped — document verification {doc_result.status.value.lower()}"
+                )
             await tracer.warning(
                 TraceComponent.PIPELINE,
                 f"Stopped: document verification {doc_result.status.value.lower()}",
@@ -243,15 +305,13 @@ class ClaimsPipeline:
         except Exception as exc:
             return await self._degrade(
                 claim, tracer, TraceComponent.CROSS_DOCUMENT_VALIDATION, exc, t0,
-                remaining=[TraceComponent.DOCUMENT_EXTRACTION],
+                remaining=_DOWNSTREAM_OF[TraceComponent.CROSS_DOCUMENT_VALIDATION],
             )
         claim.cross_document_validation_result = cross_result
 
         if cross_result.status != CrossDocumentValidationStatus.PASS:
-            await tracer.skipped(
-                TraceComponent.DOCUMENT_EXTRACTION,
-                "Skipped — cross-document validation failed",
-            )
+            for component in _DOWNSTREAM_OF[TraceComponent.CROSS_DOCUMENT_VALIDATION]:
+                await tracer.skipped(component, "Skipped — cross-document validation failed")
             await tracer.warning(
                 TraceComponent.PIPELINE,
                 "Stopped: cross-document validation failed",
@@ -289,19 +349,114 @@ class ClaimsPipeline:
                 )
             except Exception as exc:
                 return await self._degrade(
-                    claim, tracer, TraceComponent.DOCUMENT_EXTRACTION, exc, t0, remaining=[],
+                    claim, tracer, TraceComponent.DOCUMENT_EXTRACTION, exc, t0,
+                    remaining=_DOWNSTREAM_OF[TraceComponent.DOCUMENT_EXTRACTION],
                 )
             claim.extraction_result = extraction_result
 
-        # ── End of Phase 2B ───────────────────────────────────────────────────
+        # ── Stage 5: Policy Evaluation (Phase 2C) ───────────────────────────
+        policy_failed = False
+        if self._policy_engine is None:
+            await tracer.skipped(
+                TraceComponent.POLICY_ENGINE, "Skipped — no policy engine configured for this pipeline"
+            )
+        else:
+            policy_result, policy_failed = await self._run_soft_stage(
+                tracer,
+                TraceComponent.POLICY_ENGINE,
+                lambda: self._policy_engine.evaluate(claim),
+                metadata_fn=lambda r: {
+                    "covered": r.covered,
+                    "rules_checked": len(r.findings),
+                    "rules_passed": len(r.passed_rules),
+                    "rules_failed": len(r.failed_rules),
+                    "waiting_period": r.waiting_period_applies,
+                    "exclusion": r.exclusion_applies,
+                    "pre_auth": r.requires_pre_authorization,
+                },
+                confidence_fn=lambda r: r.confidence,
+            )
+            claim.policy_evaluation_result = policy_result
+
+        # ── Stage 6: Financial Calculation (Phase 2C) ───────────────────────
+        # Depends on Stage 5's output — skipped (not attempted) if Policy
+        # Evaluation didn't produce a result, whether because it wasn't
+        # configured or because it failed.
+        financial_failed = False
+        if claim.policy_evaluation_result is None:
+            await tracer.skipped(
+                TraceComponent.FINANCIAL_CALCULATION,
+                "Skipped — no policy evaluation result available"
+                if self._policy_engine is not None
+                else "Skipped — no policy engine configured for this pipeline",
+            )
+        elif self._financial_calculation_service is None:
+            await tracer.skipped(
+                TraceComponent.FINANCIAL_CALCULATION,
+                "Skipped — no financial calculation service configured for this pipeline",
+            )
+        else:
+            policy_result_for_calc = claim.policy_evaluation_result
+            financial_result, financial_failed = await self._run_soft_stage(
+                tracer,
+                TraceComponent.FINANCIAL_CALCULATION,
+                lambda: _run_financial_calc(self._financial_calculation_service, claim, policy_result_for_calc),
+                metadata_fn=lambda r: {
+                    "claimed_amount": str(r.claimed_amount),
+                    "eligible_amount": str(r.eligible_amount),
+                    "sub_limit_applied": r.sub_limit_applied,
+                    "per_claim_limit_applied": r.per_claim_limit_applied,
+                    "copay_applied": bool(r.copay_percent),
+                    "payable_amount": str(r.payable_amount),
+                    "currency": r.currency,
+                },
+                confidence_fn=lambda r: r.confidence,
+            )
+            claim.financial_calculation_result = financial_result
+
+        # ── Stage 7: Fraud Analysis (Phase 2C) ──────────────────────────────
+        # Independent of Stages 5/6's success — fraud signals (claim
+        # patterns, history, amount) don't require a computed payable
+        # amount, so this always attempts to run if configured, even if
+        # Policy/Financial degraded above.
+        fraud_failed = False
+        if self._fraud_analysis_agent is None:
+            await tracer.skipped(
+                TraceComponent.FRAUD_ANALYSIS, "Skipped — no fraud analysis agent configured for this pipeline"
+            )
+        else:
+            fraud_result, fraud_failed = await self._run_soft_stage(
+                tracer,
+                TraceComponent.FRAUD_ANALYSIS,
+                lambda: self._fraud_analysis_agent.run(claim),
+                metadata_fn=lambda r: {
+                    "flags": [f.code for f in r.flags],
+                    "deterministic_thresholds_triggered": r.deterministic_thresholds_triggered,
+                    "risk_level": r.risk_level.value,
+                    "same_day_claim_count": r.same_day_claim_count,
+                    "monthly_claim_count": r.monthly_claim_count,
+                    "requires_manual_review": r.requires_manual_review,
+                },
+                confidence_fn=lambda r: r.confidence,
+            )
+            claim.fraud_analysis_result = fraud_result
+
+        # ── End of Phase 2C ───────────────────────────────────────────────────
         await tracer.completed(
             TraceComponent.PIPELINE,
-            message="Reached end of Phase 2B pipeline — policy evaluation and decision are not yet implemented",
+            message="Reached end of Phase 2C pipeline — final decision generation is not yet implemented",
             duration_ms=(time.monotonic() - t0) * 1000,
+            metadata={
+                "policy_failed": policy_failed,
+                "financial_failed": financial_failed,
+                "fraud_failed": fraud_failed,
+            },
         )
         claim.status = ClaimStatus.PROCESSING
         claim.stopped_at = None
-        claim.user_message = _final_user_message(claim)
+        claim.user_message = _final_user_message(
+            claim, policy_failed=policy_failed, financial_failed=financial_failed, fraud_failed=fraud_failed
+        )
         claim.processing_time_ms = (time.monotonic() - t0) * 1000
         return claim
 
@@ -409,3 +564,40 @@ class ClaimsPipeline:
                 ai_metadata=ai_metadata_fn(result) if ai_metadata_fn else None,
             )
             return result
+
+    async def _run_soft_stage(
+        self,
+        tracer: TraceService,
+        component: TraceComponent,
+        coro_factory: Callable[[], Coroutine[Any, Any, T]],
+        *,
+        metadata_fn: Callable[[T], Dict[str, Any]],
+        confidence_fn: Optional[Callable[[T], Optional[float]]] = None,
+    ) -> Tuple[Optional[T], bool]:
+        """
+        Like `_run_stage`, but a failure does NOT propagate — used for
+        Phase 2C's Policy/Financial/Fraud stages, which are findings for
+        Phase 2D to weigh, not early-stop gates (see module docstring
+        "Phase 2C note"). Returns `(result, failed)`: on success,
+        `(result, False)`; on a genuine exception, `(None, True)` — the
+        FAILED trace event is still recorded (same safe error info as
+        `_run_stage`), but the caller continues to the next stage instead
+        of degrading the whole claim. The corresponding `claim.*_result`
+        field is left `None` by the caller — never a guessed/fabricated
+        result.
+        """
+        t0 = time.monotonic()
+        await tracer.started(component)
+        try:
+            result = await coro_factory()
+        except Exception as exc:
+            await tracer.failed(component, exc, duration_ms=(time.monotonic() - t0) * 1000)
+            return None, True
+        else:
+            await tracer.completed(
+                component,
+                duration_ms=(time.monotonic() - t0) * 1000,
+                metadata=metadata_fn(result),
+                confidence=confidence_fn(result) if confidence_fn else None,
+            )
+            return result, False

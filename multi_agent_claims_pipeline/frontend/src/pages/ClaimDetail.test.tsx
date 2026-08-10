@@ -12,7 +12,13 @@ import '@testing-library/jest-dom'
 import { ClaimDetail } from './ClaimDetail'
 import { claimsApi } from '../services/api'
 import { useClaimTrace } from '../hooks/useClaimTrace'
-import type { ClaimResponse, DocumentExtractionResult } from '../types'
+import type {
+  ClaimResponse,
+  DocumentExtractionResult,
+  FinancialCalculationResult,
+  FraudAnalysisResult,
+  PolicyEvaluationResult,
+} from '../types'
 
 vi.mock('../services/api', () => ({
   claimsApi: { get: vi.fn() },
@@ -302,5 +308,120 @@ describe('ClaimDetail — extracted information (Phase 2B)', () => {
     expect(screen.getByTestId('extraction-failure-reason')).toHaveTextContent(
       'AI provider returned no structured extraction'
     )
+  })
+})
+
+describe('ClaimDetail — policy/financial/fraud (Phase 2C)', () => {
+  beforeEach(() => {
+    vi.mocked(claimsApi.get).mockReset()
+    vi.mocked(useClaimTrace).mockReturnValue({ events: [], loading: false, error: null, refetch: vi.fn() })
+  })
+
+  const policyResult: PolicyEvaluationResult = {
+    covered: true,
+    coverage_category: 'CONSULTATION',
+    findings: [
+      { rule: 'CONSULTATION_COVERED', status: 'PASSED', evidence: 'opd_categories.consultation.covered = true', details: {} },
+      { rule: 'SUBMISSION_DEADLINE', status: 'FAILED', evidence: 'Submitted 700 day(s) after treatment_date.', details: {} },
+    ],
+    passed_rules: ['CONSULTATION_COVERED'],
+    failed_rules: ['SUBMISSION_DEADLINE'],
+    warnings: [],
+    requires_pre_authorization: false,
+    pre_authorization_provided: false,
+    waiting_period_applies: false,
+    exclusion_applies: false,
+    is_network_hospital: false,
+    sub_limit: 2000,
+    per_claim_limit: 5000,
+    annual_opd_limit: 50000,
+    copay_percent: 10,
+    network_discount_percent: 20,
+    line_item_findings: [],
+    confidence: 1.0,
+  }
+
+  const financialResult: FinancialCalculationResult = {
+    claimed_amount: 1500,
+    eligible_amount: 1500,
+    network_discount_percent: 0,
+    network_discount_amount: 0,
+    amount_after_network_discount: 1500,
+    sub_limit: 2000,
+    sub_limit_applied: false,
+    per_claim_limit: 5000,
+    per_claim_limit_applied: false,
+    annual_opd_limit: 50000,
+    annual_limit_applied: false,
+    amount_after_limits: 1500,
+    copay_percent: 10,
+    copay_amount: 150,
+    payable_amount: 1350,
+    currency: 'INR',
+    calculation_steps: ['Claimed amount: 1500', 'Co-pay (10%) deducted: -150.00 -> 1350.00'],
+    warnings: [],
+    confidence: 1.0,
+  }
+
+  const fraudResult: FraudAnalysisResult = {
+    risk_level: 'LOW',
+    flags: [],
+    deterministic_thresholds_triggered: [],
+    same_day_claim_count: 1,
+    monthly_claim_count: 1,
+    is_high_value: false,
+    requires_manual_review: false,
+    confidence: 1.0,
+  }
+
+  it('renders policy, financial, and fraud sections from real backend values', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      status: 'PROCESSING',
+      policy_evaluation_result: policyResult,
+      financial_calculation_result: financialResult,
+      fraud_analysis_result: fraudResult,
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByText('Policy Evaluation')).toBeInTheDocument())
+    expect(screen.getByText('Covered')).toBeInTheDocument()
+    expect(screen.getByText('Financial Calculation')).toBeInTheDocument()
+    expect(screen.getByText('₹1,350.00')).toBeInTheDocument() // payable amount, from the backend, not computed here
+    expect(screen.getByText('Fraud Analysis')).toBeInTheDocument()
+    expect(screen.getByText('LOW Risk')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId('toggle-policy-rules'))
+    expect(screen.getByTestId('policy-rules-list')).toHaveTextContent('SUBMISSION DEADLINE')
+  })
+
+  it('does not render policy/financial/fraud sections when results are absent', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({ ...baseClaim })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByText('CLM-TEST01')).toBeInTheDocument())
+    expect(screen.queryByText('Policy Evaluation')).not.toBeInTheDocument()
+    expect(screen.queryByText('Financial Calculation')).not.toBeInTheDocument()
+    expect(screen.queryByText('Fraud Analysis')).not.toBeInTheDocument()
+  })
+
+  it('shows fraud flags and manual-review badge when triggered', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      fraud_analysis_result: {
+        ...fraudResult,
+        risk_level: 'HIGH',
+        requires_manual_review: true,
+        flags: [{ code: 'SAME_DAY_CLAIMS_LIMIT_EXCEEDED', message: '4 claims exceeds limit of 2.', evidence: {} }],
+      },
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByText('HIGH Risk')).toBeInTheDocument())
+    expect(screen.getByText('Manual Review Recommended')).toBeInTheDocument()
+    expect(screen.getByTestId('fraud-flags')).toHaveTextContent('4 claims exceeds limit of 2.')
   })
 })

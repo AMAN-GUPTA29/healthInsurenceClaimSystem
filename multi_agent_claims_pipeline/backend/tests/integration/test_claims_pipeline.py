@@ -12,6 +12,9 @@ from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
 from app.agents.document_extraction_agent import DocumentExtractionAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
+from app.agents.fraud_analysis_agent import FraudAnalysisAgent
+from app.policy.policy_engine import PolicyEngine
+from app.services.financial_calculation_service import FinancialCalculationService
 from app.ai.schemas.ai_schemas import DocumentAnalysisResponse
 from app.domain.errors import AITimeoutError
 from app.domain.models import Claim, ClaimCategory, ClaimStatus, ClaimSubmission, DocumentMetadata
@@ -82,12 +85,13 @@ class TestFullPassThroughPhase2A:
         assert result.cross_document_validation_result.status.value == "PASS"
 
     @pytest.mark.anyio
-    async def test_full_pass_trace_has_no_failed_events_and_only_skips_unconfigured_extraction(
+    async def test_full_pass_trace_has_no_failed_events_and_only_skips_unconfigured_stages(
         self, policy_repository
     ):
         # build_pipeline() deliberately doesn't pass a document_extraction_agent
-        # (these tests never exercise real AI extraction) — DOCUMENT_EXTRACTION
-        # is legitimately SKIPPED in that case (Phase 2B), not a failure.
+        # or any Phase 2C component (these tests never exercise real AI
+        # extraction or policy/financial/fraud) — all four are legitimately
+        # SKIPPED in that case, not a failure.
         claim = make_claim()
         classifications = {
             "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
@@ -101,7 +105,12 @@ class TestFullPassThroughPhase2A:
         event_types = {e.event_type for e in tracer.events}
         assert TraceEventType.FAILED not in event_types
         skipped_components = {e.component for e in tracer.events if e.event_type == TraceEventType.SKIPPED}
-        assert skipped_components == {TraceComponent.DOCUMENT_EXTRACTION}
+        assert skipped_components == {
+            TraceComponent.DOCUMENT_EXTRACTION,
+            TraceComponent.POLICY_ENGINE,
+            TraceComponent.FINANCIAL_CALCULATION,
+            TraceComponent.FRAUD_ANALYSIS,
+        }
         assert tracer.events[-1].component == TraceComponent.PIPELINE
         assert tracer.events[-1].event_type == TraceEventType.COMPLETED
 
@@ -362,8 +371,8 @@ class TestDocumentExtractionStage:
         completed = next(e for e in extraction_events if e.event_type == TraceEventType.COMPLETED)
         assert completed.ai_metadata is not None
         assert completed.ai_metadata.provider == "fake"
-        # PIPELINE-level completion event must reflect Phase 2B, not Phase 2A.
-        assert "2B" in tracer.events[-1].message
+        # PIPELINE-level completion event must reflect the current phase.
+        assert "2C" in tracer.events[-1].message
 
     @pytest.mark.anyio
     async def test_one_failed_extraction_does_not_block_the_claim(self, policy_repository):
@@ -411,3 +420,152 @@ class TestDocumentExtractionStage:
         assert result.extraction_result is None
         skipped = [e for e in tracer.events if e.event_type == TraceEventType.SKIPPED]
         assert any(e.component == TraceComponent.DOCUMENT_EXTRACTION for e in skipped)
+
+
+# ── Phase 2C: Policy Evaluation, Financial Calculation, Fraud Analysis ──────
+
+
+def build_full_pipeline(policy_repository) -> ClaimsPipeline:
+    """All stages configured, including Phase 2C — none of Policy/Financial/
+    Fraud call AI, so no fake provider is needed here."""
+    return ClaimsPipeline(
+        claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
+        document_verification_agent=DocumentVerificationAgent(
+            ai_provider=None, policy_repository=policy_repository
+        ),
+        cross_document_validation_agent=CrossDocumentValidationAgent(),
+        policy_engine=PolicyEngine(policy_repository=policy_repository),
+        financial_calculation_service=FinancialCalculationService(),
+        fraud_analysis_agent=FraudAnalysisAgent(policy_repository=policy_repository),
+    )
+
+
+class TestPolicyFinancialFraudIntegration:
+    """Assignment section 35: EMP001/CONSULTATION/Rajesh Kumar prescription
+    + bill/claimed 1500 must reach Policy Evaluation, Financial
+    Calculation, and Fraud Analysis, with all three traced. No final
+    decision is asserted — Phase 2D doesn't exist yet."""
+
+    @pytest.mark.anyio
+    async def test_full_pipeline_reaches_policy_financial_and_fraud(self, policy_repository):
+        claim = make_claim()
+        classifications = {
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+        }
+        pipeline = build_full_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.PROCESSING
+        assert result.decision is None  # Phase 2D not implemented — no final decision yet
+
+        assert result.policy_evaluation_result is not None
+        assert result.policy_evaluation_result.coverage_category == "CONSULTATION"
+        assert result.financial_calculation_result is not None
+        assert result.financial_calculation_result.payable_amount is not None
+        assert result.fraud_analysis_result is not None
+        assert result.fraud_analysis_result.risk_level is not None
+
+        components_completed = {
+            e.component for e in tracer.events if e.event_type == TraceEventType.COMPLETED
+        }
+        assert TraceComponent.POLICY_ENGINE in components_completed
+        assert TraceComponent.FINANCIAL_CALCULATION in components_completed
+        assert TraceComponent.FRAUD_ANALYSIS in components_completed
+        assert TraceEventType.FAILED not in {e.event_type for e in tracer.events}
+
+
+class TestPhase2AFixStillEarlyStopsBeforePhase2C:
+    """Assignment section 36 — regression guard: EMP001 (Rajesh Kumar) with
+    two "Vikram Joshi" documents must still stop at CROSS_DOCUMENT_VALIDATION
+    (Phase 2A identity fix), and PolicyEngine/FinancialCalculationService/
+    FraudAnalysisAgent must never run."""
+
+    @pytest.mark.anyio
+    async def test_member_identity_mismatch_blocks_before_policy_financial_fraud(self, policy_repository):
+        claim = make_claim(
+            documents=[
+                DocumentMetadata(file_id="F007", file_name="rx.jpg"),
+                DocumentMetadata(file_id="F008", file_name="bill.jpg"),
+            ]
+        )
+        classifications = {
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Vikram Joshi", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Vikram Joshi", confidence=1.0
+            ),
+        }
+        pipeline = build_full_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.BLOCKED
+        assert result.stopped_at == "CROSS_DOCUMENT_VALIDATION"
+        assert result.policy_evaluation_result is None
+        assert result.financial_calculation_result is None
+        assert result.fraud_analysis_result is None
+
+        started_components = {e.component for e in tracer.events if e.event_type == TraceEventType.STARTED}
+        assert TraceComponent.POLICY_ENGINE not in started_components
+        assert TraceComponent.FINANCIAL_CALCULATION not in started_components
+        assert TraceComponent.FRAUD_ANALYSIS not in started_components
+
+        skipped_components = {e.component for e in tracer.events if e.event_type == TraceEventType.SKIPPED}
+        assert TraceComponent.POLICY_ENGINE in skipped_components
+        assert TraceComponent.FINANCIAL_CALCULATION in skipped_components
+        assert TraceComponent.FRAUD_ANALYSIS in skipped_components
+
+
+class TestPolicyEngineFailureDegradesGracefully:
+    """Assignment section 25/46: a genuine PolicyEngine failure must not
+    silently approve/continue as if nothing happened, must not crash the
+    claim, and must be visible in the trace. Financial Calculation must be
+    skipped (it needs PolicyEvaluationResult); Fraud Analysis must still
+    run independently."""
+
+    @pytest.mark.anyio
+    async def test_policy_engine_exception_skips_financial_but_not_fraud(self, policy_repository):
+        class _FailingPolicyEngine:
+            async def evaluate(self, claim):
+                raise RuntimeError("simulated PolicyEngine failure")
+
+        claim = make_claim()
+        classifications = {
+            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
+            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+        }
+        pipeline = ClaimsPipeline(
+            claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
+            document_verification_agent=DocumentVerificationAgent(
+                ai_provider=None, policy_repository=policy_repository
+            ),
+            cross_document_validation_agent=CrossDocumentValidationAgent(),
+            policy_engine=_FailingPolicyEngine(),
+            financial_calculation_service=FinancialCalculationService(),
+            fraud_analysis_agent=FraudAnalysisAgent(policy_repository=policy_repository),
+        )
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        # Never crashes, never silently proceeds as if policy passed.
+        assert result.status == ClaimStatus.PROCESSING
+        assert result.policy_evaluation_result is None
+        assert result.financial_calculation_result is None
+        # Fraud is independent of policy/financial — it still ran.
+        assert result.fraud_analysis_result is not None
+
+        policy_events = [e for e in tracer.events if e.component == TraceComponent.POLICY_ENGINE]
+        assert any(e.event_type == TraceEventType.FAILED for e in policy_events)
+        financial_events = [e for e in tracer.events if e.component == TraceComponent.FINANCIAL_CALCULATION]
+        assert any(e.event_type == TraceEventType.SKIPPED for e in financial_events)
+        assert "policy evaluation could not be completed" in result.user_message

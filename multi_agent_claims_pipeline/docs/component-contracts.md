@@ -531,3 +531,76 @@ No migration tooling exists yet (`Base.metadata.create_all()` only creates missi
 | Trace behavior | One `DOCUMENT_EXTRACTION` `STARTED`→`COMPLETED` pair per claim (via `ClaimsPipeline._run_stage`), **always `COMPLETED`, never `FAILED`, even with per-document failures** — the agent did its job (attempted every extractable document, recorded what it could and couldn't do); `FAILED` is reserved for a genuine failure of the agent itself, which the per-document isolation makes essentially unreachable in practice. Metadata: `{"documents_extracted", "failures", "skipped", "has_failures"}`; `ai_metadata` carries the first successful call's provider/model/latency. |
 
 ---
+
+## PolicyEngine (Phase 2C)
+
+**File**: `app/policy/policy_engine.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | The deterministic authority on "what does the policy say about this claim?" — coverage, limits, waiting periods, exclusions, pre-authorization, network status. Never decides the payable amount (`FinancialCalculationService`) or the final decision (`DecisionGenerationAgent`, Phase 2D). |
+| Input | `evaluate(claim: Claim) -> PolicyEvaluationResult` — reads `claim.submission`, `claim.member` (Phase 2A's identity fix — see Decision 31), and `claim.extraction_result` (Phase 2B). Makes no AI calls (`ai_provider=None`, same pattern as `ClaimValidationAgent`). |
+| Output | `PolicyEvaluationResult` (`app/domain/policy_evaluation.py`) — `covered`, `coverage_category`, a full `findings: List[PolicyRuleFinding]` (one per rule checked, `PASSED`/`FAILED`/`WARNING`/`NOT_APPLICABLE`), `passed_rules`/`failed_rules`/`warnings` (rule-code lists derived from `findings`, for cheap API/UI filtering without re-scanning), `requires_pre_authorization`/`pre_authorization_provided`, `waiting_period_applies`, `exclusion_applies`, `is_network_hospital: Optional[bool]` (`None` = hospital name unknown, not "not network"), `sub_limit`/`per_claim_limit`/`annual_opd_limit`/`copay_percent`/`network_discount_percent` (resolved values, for `FinancialCalculationService` to consume without re-reading `PolicyRepository`), `line_item_findings` (DENTAL/VISION only — per-line-item excluded/included verdicts), `confidence`. |
+| Rule categories checked | Policy validity (id/dates/renewal), category coverage, submission deadline, minimum claim amount, per-claim limit, annual OPD limit, category sub-limit, copay (informational), network discount/hospital match, waiting periods (initial + pre-existing + specific-condition), exclusions (general + dental/vision-specific + per-line-item), pre-authorization (threshold + high-value-test list + provided-or-not), prescription requirement, dental-report requirement, registered-practitioner requirement, session limit (category-specific, DENTAL/alternative medicine). Each check is a private `_check_*` method returning one or more `PolicyRuleFinding`s — see the file for the full list; nothing here is hardcoded, every threshold/list comes from `PolicyRepository`. |
+| Text matching | Diagnosis/treatment/procedure text (from `claim.extraction_result`) is matched against policy phrases via `_word_boundary_contains()` (regex `\b`-delimited, whole-word/whole-phrase) for specific-condition and general-exclusion keywords — **not** naive `phrase in text` substring containment, which produced a real false positive (`"hernia"` matching inside `"Herniation"`, an unrelated spinal-disc condition) found during live verification. See `docs/tradeoffs.md` "Diagnosis/Exclusion Normalization" for the full rationale, the hand-curated `_EXCLUSION_KEYWORDS`/`_CONDITION_ALIASES` tables, and why dental/vision line-item matching (`_match_short_phrases`) deliberately keeps bidirectional plain substring matching instead (short, closed-vocabulary procedure names, not free-text diagnoses). |
+| Failure handling | `PolicyEngine.evaluate()` can raise (e.g. malformed extraction data) — `ClaimsPipeline` runs it through `_run_soft_stage()` (see below), which catches any exception, records `FAILED` in the trace, leaves `claim.policy_evaluation_result = None`, and **does not** treat this as an approval or a rejection — it's simply "policy could not be evaluated," surfaced to a human. `FinancialCalculationService` is skipped entirely if this happens (it has nothing to calculate from). |
+| Trace behavior | One `POLICY_ENGINE` `STARTED`→`COMPLETED`/`FAILED` pair per claim. Metadata summarises `covered`/`failed_rules`/`waiting_period_applies`/`exclusion_applies` — never the full findings list verbatim (kept in the persisted result, not duplicated into trace rows, same reasoning as extraction). |
+
+---
+
+## FinancialCalculationService (Phase 2C)
+
+**File**: `app/services/financial_calculation_service.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | Answers "what is the mathematically eligible/payable amount, given the policy findings?" — pure `Decimal` arithmetic, no AI, no policy-rule knowledge of its own (it consumes `PolicyEvaluationResult`, it doesn't re-derive limits from `PolicyRepository`). |
+| Input | `calculate(claim: Claim, policy: PolicyEvaluationResult) -> FinancialBreakdown` — **synchronous** (no I/O; wrapped in an `async` helper at the pipeline call site only because `_run_stage`'s signature expects an awaitable). |
+| Output | `FinancialBreakdown` (`app/domain/models.py`, extended in Phase 2C) — `claimed_amount`, `eligible_amount`, `network_discount_percent`/`_amount`, `amount_after_network_discount`, `sub_limit`/`sub_limit_applied`, `per_claim_limit`/`per_claim_limit_applied`, `annual_opd_limit`/`annual_limit_applied`, `amount_after_limits`, `copay_percent`/`_amount`, `payable_amount`, `currency` ("INR"), `calculation_steps: List[str]` (human-readable audit trail, one entry per step actually applied), `warnings: List[str]` (reconciliation mismatches — see below), `confidence` (1.0, or 0.7 if any warning was recorded). |
+| Calculation order | claimed/itemized-eligible amount → network discount → category sub-limit cap → per-claim limit cap → remaining annual OPD allowance cap (`max(annual_opd_limit - ytd_claims_amount, 0)`) → copay deduction → `payable_amount`. Fixed order, not configurable per claim — see `docs/tradeoffs.md` "Financial Calculation Order" for why this exact order was chosen and the one place it disagrees with `test_cases.json`'s own worked examples (TC006, TC010). |
+| Eligible-amount resolution | DENTAL/VISION claims with `policy.line_item_findings` populated: sum of the *non-excluded* line items only (so "root canal covered, whitening excluded" produces a correctly-reduced base before any limit/copay math runs). Every other category: `claimed_amount` as submitted — **never** silently replaced by an AI-extracted bill total; a mismatch is reported as a `warnings` entry, the original submitted/extracted values are always preserved unchanged. |
+| Rounding | `Decimal.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)` at every intermediate money-producing step (discount amount, each cap comparison keeps full precision, copay amount) — never truncation, never Python's banker's-rounding default. See `docs/tradeoffs.md` "Rounding" for a worked example (`333.33 × 33% = 109.9989 → 110.00`, not `109.99`). |
+| Bill amount reconciliation | `_check_reconciliation()` compares (a) sum(line items) vs. the document's own reported total, and (b) the reported total vs. the resolved eligible-amount base — a difference beyond a small ₹1.00 tolerance becomes a `warnings` entry with both values named, never an automatic correction of either. See `docs/tradeoffs.md` "Bill Amount Reconciliation". |
+| Failure handling | Can raise (e.g. missing required policy fields). `ClaimsPipeline` runs it through `_run_soft_stage()`; a failure leaves `claim.financial_calculation_result = None` — **never** a guessed/defaulted payable amount. Also skipped (not attempted, not a failure) if `policy_evaluation_result` is `None`. |
+| Trace behavior | One `FINANCIAL_CALCULATION` `STARTED`→`COMPLETED`/`FAILED`/`SKIPPED` pair. Metadata: `payable_amount`, `sub_limit_applied`/`per_claim_limit_applied`/`annual_limit_applied`, `warnings_count` — the full `calculation_steps` audit trail lives on the persisted result, not duplicated into the trace row. |
+
+---
+
+## FraudAnalysisAgent (Phase 2C)
+
+**File**: `app/agents/fraud_analysis_agent.py`
+
+### Contract
+
+| Property | Value |
+|----------|-------|
+| Purpose | Answers "are there fraud/manual-review signals for this claim?" using deterministic thresholds from `policy_terms.json`'s `fraud_thresholds` (via `PolicyRepository`) — never itself an approval/rejection decision, only flags for `DecisionGenerationAgent` (Phase 2D) to weigh later. |
+| Input | `run(claim: Claim) -> FraudAnalysisResult`. Runs independently of `PolicyEngine`/`FinancialCalculationService` — a policy or financial failure does **not** skip fraud analysis, since fraud signals (same-day pattern, high value) are meaningful regardless of whether coverage/payable amount could be computed. |
+| Output | `FraudAnalysisResult` (`app/domain/fraud.py`) — `risk_level` (`LOW`/`MEDIUM`/`HIGH`), `flags: List[FraudFlag]` (`code`/`message`/`evidence`, one per triggered threshold), `deterministic_thresholds_triggered: List[str]` (flag codes, for cheap filtering), `same_day_claim_count`/`monthly_claim_count` (**current claim always included** — a claim with zero prior history still counts as 1, a documented assumption), `is_high_value`, `requires_manual_review`, `ai_risk_score: Optional[float]` (**always `None` in this phase** — deliberately reserved, never populated from a deterministic signal, see below), `confidence`. |
+| Thresholds | All four read from `PolicyRepository.fraud_thresholds`, never hardcoded: `same_day_claims_limit` (strictly-greater-than triggers `SAME_DAY_CLAIMS_LIMIT_EXCEEDED`), `monthly_claims_limit` (`MONTHLY_CLAIMS_LIMIT_EXCEEDED`), `high_value_claim_threshold` (`>=` triggers `HIGH_VALUE_CLAIM`, `MEDIUM` risk on its own), `auto_manual_review_above` (strictly-greater-than triggers `AUTO_MANUAL_REVIEW_THRESHOLD_EXCEEDED`, forces `HIGH` risk + `requires_manual_review=True`). `requires_manual_review` is **not** set by `is_high_value` alone — see `docs/tradeoffs.md` "Fraud Counting Semantics". |
+| Historical claims | `_resolve_history()` — same "fixture ground truth vs. real query" pattern as `DocumentInputAdapter` (Decision 17): `submission.claims_history` (evaluation-runner/test-fixture path, e.g. TC009) takes priority when present; otherwise queries the real persisted history via `ClaimRepository.list_by_member()` (excluding the current claim by id). Never fabricates history — no repository and no fixture data means an empty list, not an invented one. |
+| AI/deterministic separation | This phase makes **zero AI calls** (`ai_provider=None`) — every threshold is exact and policy-defined, so a deterministic-only implementation is sufficient and more explainable than an AI-assisted score would be for this phase. `ai_risk_score` exists on the result model specifically so a *future* AI-assisted signal has a field to populate **without ever being conflated with** `deterministic_thresholds_triggered` — the two must never merge into one undifferentiated "risk score". |
+| Failure handling | Raises `ComponentFailureError` (recoverable) when `submission.simulate_component_failure=True` — wires up a Phase 0 domain field that was unused until this phase. `ClaimsPipeline` runs fraud analysis through `_run_soft_stage()`; a failure leaves `claim.fraud_analysis_result = None`, never crashes the claim. |
+| Trace behavior | One `FRAUD_ANALYSIS` `STARTED`→`COMPLETED`/`FAILED` pair. Metadata: `risk_level`, `flags_count`, `requires_manual_review`, `same_day_claim_count`/`monthly_claim_count`. |
+
+---
+
+## ClaimsPipeline — Phase 2C stages (Policy → Financial → Fraud)
+
+**File**: `app/pipeline/pipeline.py`
+
+### Contract additions
+
+| Property | Value |
+|----------|-------|
+| New stages | Stage 5 `POLICY_ENGINE`, Stage 6 `FINANCIAL_CALCULATION`, Stage 7 `FRAUD_ANALYSIS` — all after `DOCUMENT_EXTRACTION`, all constructor arguments `Optional[...] = None` (same backward-compatibility trick as Decision 30 for `document_extraction_agent`; the evaluation runner and every pre-2C pipeline test needed zero changes). |
+| Soft-fail, not hard-stop | Unlike the three Phase 2A stages (`ClaimValidationAgent`/`DocumentVerificationAgent`/`CrossDocumentValidationAgent`, which early-stop the claim with `status=BLOCKED` on a business-rule failure), Policy/Financial/Fraud are **soft-fail**: `_run_soft_stage()` (new helper, mirrors `_run_stage` but catches any exception and returns `(None, degraded=True)` instead of re-raising) — a failure records `FAILED` in the trace and leaves the corresponding `claim.*_result` field `None`, but `claim.status` stays `PROCESSING` and the pipeline continues to the next stage. This matches the assignment's explicit instruction not to implement final decision generation yet — these stages inform a future decision, they don't gate the claim themselves. |
+| Stage skip conditions | `POLICY_ENGINE`: skipped if `policy_engine is None`. `FINANCIAL_CALCULATION`: skipped if `financial_calculation_service is None` **or** `claim.policy_evaluation_result is None` (distinct skip messages — "not configured" vs. "policy could not be evaluated" — so the trace/UI can tell the two apart). `FRAUD_ANALYSIS`: skipped only if `fraud_analysis_agent is None` — runs independently of Policy/Financial outcome (a policy or financial failure never skips fraud analysis). |
+| Downstream-skip completeness | `_PIPELINE_ORDER`/`_DOWNSTREAM_OF` (module-level, `Dict[TraceComponent, List[TraceComponent]]`) — when a Phase 2A stage early-stops the claim (invalid claim / document verification blocked / cross-document validation blocked), **every** downstream stage (including all three Phase 2C stages) is explicitly recorded `SKIPPED` in the trace, not silently absent. Found via a failing regression test (`TestPhase2AFixStillEarlyStopsBeforePhase2C`) after adding the 3 new stages — the pre-existing early-stop blocks only skipped the single immediately-next stage, which was correct before Phase 2C but became incomplete once 3 more stages existed downstream. The same `_DOWNSTREAM_OF` mapping is also used by `_degrade()`'s exception-path skip list, replacing a previously-hardcoded list. |
+| Persistence | `ClaimORM.policy_evaluation_result_json`/`financial_calculation_result_json`/`fraud_analysis_result_json` — simple JSON-blob columns (claim-level, not per-document, so no hybrid/denormalised-column treatment the way Phase 2B's extraction needed) on the existing `claims` row, same pattern as the Phase 2A `*_result_json` columns. `ClaimRepository.save()`/`_to_domain()` extended to persist/rehydrate all three. Verified to survive a database round-trip via a dedicated regression test (`test_policy_financial_fraud_results_survive_a_database_round_trip`, `tests/integration/test_claims_api.py`) — POST then a *separate* GET (a fresh `ClaimRepository.get_by_id()` call) confirms the results were actually written to SQLite and correctly rehydrated, not just present on the in-memory `Claim` the pipeline just produced. |
+
+---

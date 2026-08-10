@@ -16,6 +16,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 from app.domain.extraction import ClaimExtractionResult, DocumentExtractionResult
+from app.domain.fraud import FraudAnalysisResult
 from app.domain.models import (
     Claim,
     ClaimCategory,
@@ -23,7 +24,9 @@ from app.domain.models import (
     DocumentProcessingStatus,
     DocumentQuality,
     DocumentType,
+    FinancialBreakdown,
 )
+from app.domain.policy_evaluation import PolicyEvaluationResult
 from app.domain.verification import (
     CrossDocumentValidationResult,
     DocumentVerificationResult,
@@ -72,6 +75,13 @@ class ClaimResponse(BaseModel):
     document_verification_result: Optional[DocumentVerificationResult] = None
     cross_document_validation_result: Optional[CrossDocumentValidationResult] = None
     extraction_result: Optional[ClaimExtractionResult] = None
+    # Phase 2C — directly reuse the domain result models (same precedent as
+    # every *_result field above): None means "not reached", "not
+    # configured for this pipeline", or "this stage failed and degraded
+    # gracefully" — check the trace for which.
+    policy_evaluation_result: Optional[PolicyEvaluationResult] = None
+    financial_calculation_result: Optional[FinancialBreakdown] = None
+    fraud_analysis_result: Optional[FraudAnalysisResult] = None
     created_at: datetime
     updated_at: datetime
 
@@ -113,6 +123,9 @@ class ClaimResponse(BaseModel):
             document_verification_result=claim.document_verification_result,
             cross_document_validation_result=claim.cross_document_validation_result,
             extraction_result=claim.extraction_result,
+            policy_evaluation_result=claim.policy_evaluation_result,
+            financial_calculation_result=claim.financial_calculation_result,
+            fraud_analysis_result=claim.fraud_analysis_result,
             created_at=claim.created_at,
             updated_at=claim.updated_at,
         )

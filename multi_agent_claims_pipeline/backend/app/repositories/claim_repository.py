@@ -12,9 +12,11 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import delete, select
 
 from app.domain.extraction import ClaimExtractionResult, DocumentExtractionFailure, DocumentExtractionResult
+from app.domain.fraud import FraudAnalysisResult
 from app.domain.models import (
     Claim,
     ClaimCategory,
+    ClaimHistoryItem,
     ClaimStatus,
     ClaimSubmission,
     Document,
@@ -22,7 +24,9 @@ from app.domain.models import (
     DocumentProcessingStatus,
     DocumentQuality,
     DocumentType,
+    FinancialBreakdown,
 )
+from app.domain.policy_evaluation import PolicyEvaluationResult
 from app.domain.trace import AITraceMetadata
 from app.domain.verification import (
     CrossDocumentValidationResult,
@@ -74,6 +78,17 @@ class ClaimRepository(BaseRepository[Claim, str]):
             )
             row.extraction_summary_json = (
                 _extraction_summary_json(claim.extraction_result) if claim.extraction_result else None
+            )
+            row.policy_evaluation_result_json = (
+                claim.policy_evaluation_result.model_dump(mode="json") if claim.policy_evaluation_result else None
+            )
+            row.financial_calculation_result_json = (
+                claim.financial_calculation_result.model_dump(mode="json")
+                if claim.financial_calculation_result
+                else None
+            )
+            row.fraud_analysis_result_json = (
+                claim.fraud_analysis_result.model_dump(mode="json") if claim.fraud_analysis_result else None
             )
             row.created_at = claim.created_at
             row.updated_at = claim.updated_at
@@ -148,6 +163,36 @@ class ClaimRepository(BaseRepository[Claim, str]):
             ).scalars().all()
             return _to_domain(row, doc_rows)
 
+    async def list_by_member(
+        self, member_id: str, *, exclude_claim_id: Optional[str] = None
+    ) -> List[ClaimHistoryItem]:
+        """
+        Real persisted claim history for one member — used by
+        FraudAnalysisAgent (Phase 2C) for same-day/monthly claim counting.
+        Deliberately lightweight: queries `ClaimORM` columns directly
+        rather than reconstructing full `Claim` objects (documents,
+        trace, extraction) that fraud counting doesn't need. `decision`
+        is always None on the returned items — `ClaimORM` has no decision
+        column yet (Phase 2D). Never fabricates history: an unknown or
+        history-free member simply returns an empty list.
+        """
+        async with get_session() as session:
+            stmt = select(ClaimORM).where(ClaimORM.member_id == member_id)
+            if exclude_claim_id is not None:
+                stmt = stmt.where(ClaimORM.claim_id != exclude_claim_id)
+            rows = (await session.execute(stmt)).scalars().all()
+            return [
+                ClaimHistoryItem(
+                    claim_id=row.claim_id,
+                    date=row.treatment_date,
+                    amount=row.claimed_amount,
+                    provider=row.hospital_name,
+                    category=ClaimCategory(row.claim_category),
+                    decision=None,
+                )
+                for row in rows
+            ]
+
 
 def _to_domain(row: ClaimORM, doc_rows: List[ClaimDocumentORM]) -> Claim:
     documents = [
@@ -203,6 +248,19 @@ def _to_domain(row: ClaimORM, doc_rows: List[ClaimDocumentORM]) -> Claim:
             else None
         ),
         extraction_result=_extraction_result_from_rows(row, doc_rows),
+        policy_evaluation_result=(
+            PolicyEvaluationResult(**row.policy_evaluation_result_json)
+            if row.policy_evaluation_result_json
+            else None
+        ),
+        financial_calculation_result=(
+            FinancialBreakdown(**row.financial_calculation_result_json)
+            if row.financial_calculation_result_json
+            else None
+        ),
+        fraud_analysis_result=(
+            FraudAnalysisResult(**row.fraud_analysis_result_json) if row.fraud_analysis_result_json else None
+        ),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

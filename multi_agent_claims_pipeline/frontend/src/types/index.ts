@@ -385,6 +385,93 @@ export interface ClaimExtractionResult {
   has_failures: boolean
 }
 
+// ── Policy Evaluation / Financial Calculation / Fraud Analysis (Phase 2C) ───
+//
+// Mirrors app/domain/policy_evaluation.py, app/domain/models.py's
+// FinancialBreakdown, and app/domain/fraud.py. None of these decide
+// APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW — that's Phase 2D's
+// DecisionGenerationAgent, still unimplemented; `financial_calculation_result
+// .payable_amount` is "what would be payable if approved," not an approval.
+
+export type PolicyRuleStatus = 'PASSED' | 'FAILED' | 'WARNING' | 'NOT_APPLICABLE'
+
+export interface PolicyRuleFinding {
+  rule: string
+  status: PolicyRuleStatus
+  evidence: string
+  details: Record<string, unknown>
+}
+
+export interface LineItemPolicyFinding {
+  description: string
+  amount?: number
+  excluded: boolean
+  reason?: string
+}
+
+export interface PolicyEvaluationResult {
+  covered: boolean
+  coverage_category: ClaimCategory
+  findings: PolicyRuleFinding[]
+  passed_rules: string[]
+  failed_rules: string[]
+  warnings: string[]
+  requires_pre_authorization: boolean
+  pre_authorization_provided: boolean
+  waiting_period_applies: boolean
+  exclusion_applies: boolean
+  is_network_hospital?: boolean
+  sub_limit?: number
+  per_claim_limit?: number
+  annual_opd_limit?: number
+  copay_percent: number
+  network_discount_percent: number
+  line_item_findings: LineItemPolicyFinding[]
+  confidence: number
+}
+
+export interface FinancialCalculationResult {
+  claimed_amount: number
+  eligible_amount: number
+  network_discount_percent: number
+  network_discount_amount: number
+  amount_after_network_discount: number
+  sub_limit?: number
+  sub_limit_applied: boolean
+  per_claim_limit?: number
+  per_claim_limit_applied: boolean
+  annual_opd_limit?: number
+  annual_limit_applied: boolean
+  amount_after_limits: number
+  copay_percent: number
+  copay_amount: number
+  payable_amount: number
+  currency: string
+  calculation_steps: string[]
+  warnings: string[]
+  confidence: number
+}
+
+export type FraudRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH'
+
+export interface FraudFlag {
+  code: string
+  message: string
+  evidence: Record<string, unknown>
+}
+
+export interface FraudAnalysisResult {
+  risk_level: FraudRiskLevel
+  flags: FraudFlag[]
+  deterministic_thresholds_triggered: string[]
+  same_day_claim_count: number
+  monthly_claim_count: number
+  is_high_value: boolean
+  requires_manual_review: boolean
+  ai_risk_score?: number
+  confidence: number
+}
+
 // ── Claim submission (Phase 2A correction: real file upload) ────────────────
 //
 // POST /api/v1/claims is multipart/form-data — claim metadata as form
@@ -436,6 +523,9 @@ export interface ClaimResponse {
   document_verification_result?: DocumentVerificationResult
   cross_document_validation_result?: CrossDocumentValidationResult
   extraction_result?: ClaimExtractionResult
+  policy_evaluation_result?: PolicyEvaluationResult
+  financial_calculation_result?: FinancialCalculationResult
+  fraud_analysis_result?: FraudAnalysisResult
   created_at: string
   updated_at: string
 }

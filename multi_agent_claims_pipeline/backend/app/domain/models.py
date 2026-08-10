@@ -291,23 +291,50 @@ class LineItemDecision(BaseModel):
 
 
 class FinancialBreakdown(BaseModel):
-    """Detailed financial calculation supporting the claim decision."""
+    """
+    Deterministic financial calculation — output of
+    FinancialCalculationService (Phase 2C). Every amount is Decimal, never
+    float (see docs/AI_HANDOFF.md invariant #3). This is a Phase 0
+    placeholder that went unused until Phase 2C filled it in; `payable_amount`
+    was named `approved_amount` at definition time but was never read or
+    written anywhere — renamed for Phase 2C since "approved" implies a
+    claim decision that doesn't exist until Phase 2D
+    (DecisionGenerationAgent), whereas this is purely "what's
+    mathematically payable under the applicable policy rules, calculated
+    as if approved." See docs/tradeoffs.md "Financial Calculation Order"
+    for why discount -> limits -> copay was chosen, and
+    docs/component-contracts.md for the full contract.
+    """
 
     claimed_amount: Decimal
+    eligible_amount: Decimal = Field(
+        description="claimed_amount, or the reconciled bill/line-item total if lower/more reliable — "
+        "the actual base FinancialCalculationService starts from, before discount/limits/copay."
+    )
     network_discount_percent: float = 0.0
     network_discount_amount: Decimal = Decimal("0")
     amount_after_network_discount: Decimal
-    copay_percent: float = 0.0
-    copay_amount: Decimal = Decimal("0")
     sub_limit: Optional[Decimal] = None
     sub_limit_applied: bool = False
     per_claim_limit: Optional[Decimal] = None
     per_claim_limit_applied: bool = False
-    approved_amount: Decimal
+    annual_opd_limit: Optional[Decimal] = None
+    annual_limit_applied: bool = False
+    amount_after_limits: Decimal = Decimal("0")
+    copay_percent: float = 0.0
+    copay_amount: Decimal = Decimal("0")
+    payable_amount: Decimal
+    currency: str = "INR"
     calculation_steps: List[str] = Field(
         default_factory=list,
         description="Human-readable ordered steps describing the calculation.",
     )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="e.g. a bill-total/line-item-sum reconciliation mismatch — never silently 'fixed', "
+        "just flagged (see docs/tradeoffs.md 'Bill Amount Reconciliation').",
+    )
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class ComponentTrace(BaseModel):
@@ -382,6 +409,10 @@ from app.domain.verification import (  # noqa: E402
 # reference ClaimExtractionResult after those names already exist.
 from app.domain.extraction import ClaimExtractionResult  # noqa: E402
 
+# Same pattern again for the Phase 2C result types.
+from app.domain.policy_evaluation import PolicyEvaluationResult  # noqa: E402
+from app.domain.fraud import FraudAnalysisResult  # noqa: E402
+
 
 def generate_claim_id() -> str:
     """
@@ -409,6 +440,15 @@ class Claim(BaseModel):
     extraction agent configured" (see ClaimsPipeline) — not "failed"; a
     per-document extraction failure is recorded inside
     `extraction_result.failures`, not by leaving the whole field None.
+
+    Phase 2C adds `policy_evaluation_result`/`financial_calculation_result`/
+    `fraud_analysis_result`. Unlike Phase 2A's stages, these do NOT gate
+    the pipeline (a failed policy rule or a fraud flag is a *finding* for
+    Phase 2D's DecisionGenerationAgent to weigh, not a reason to stop) —
+    see ClaimsPipeline's "soft-fail" handling for these three stages. A
+    None value here means either "not reached" (claim stopped earlier) or
+    "this stage failed and degraded gracefully" (check `user_message` and
+    the trace) — never "silently skipped without a trace."
     """
 
     claim_id: str = Field(default_factory=lambda: generate_claim_id())
@@ -426,6 +466,9 @@ class Claim(BaseModel):
     document_verification_result: Optional[DocumentVerificationResult] = None
     cross_document_validation_result: Optional[CrossDocumentValidationResult] = None
     extraction_result: Optional[ClaimExtractionResult] = None
+    policy_evaluation_result: Optional[PolicyEvaluationResult] = None
+    financial_calculation_result: Optional[FinancialBreakdown] = None
+    fraud_analysis_result: Optional[FraudAnalysisResult] = None
     processing_time_ms: Optional[float] = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)

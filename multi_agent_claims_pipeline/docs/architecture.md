@@ -408,6 +408,139 @@ documents succeeded vs. failed — without opening the full claim record.
 
 ---
 
+## Policy Evaluation, Financial Calculation & Fraud Analysis (Phase 2C)
+
+Phase 2C adds three more pipeline stages after document extraction —
+`PolicyEngine`, `FinancialCalculationService`, `FraudAnalysisAgent` — none
+of which make any AI calls:
+
+```
+Claim Validation → Document Verification → Cross-Document Validation → Document Extraction
+                                                                                  │
+                                                                                  ▼ (regardless of extraction outcome)
+                                                                        PolicyEngine (deterministic)
+                                                                                  │
+                                                                    ┌─────────────┴─────────────┐
+                                                                    ▼ (only if policy succeeded)  ▼ (always attempted)
+                                                        FinancialCalculationService      FraudAnalysisAgent
+                                                                    │                             │
+                                                                    └─────────────┬───────────────┘
+                                                                                  ▼
+                                                          status stays PROCESSING — no final decision yet
+```
+
+### Why these three are deterministic, never AI-driven
+Core Principle 3 (above) already commits to this: the LLM is never the
+final authority on coverage, financial arithmetic, or waiting-period math.
+Phase 2C is where that principle actually gets implemented — `PolicyEngine`
+reads only `policy_terms.json` (via `PolicyRepository`) and the claim's
+already-extracted structured data (Phase 2B); it makes zero AI calls, the
+same `ai_provider=None` pattern `ClaimValidationAgent` established in
+Phase 2A. `FinancialCalculationService` is pure `Decimal` arithmetic over
+`PolicyEngine`'s output — no AI, no policy-rule knowledge of its own.
+`FraudAnalysisAgent` reads numeric thresholds from `policy_terms.json`'s
+`fraud_thresholds` and historical claim counts — also zero AI calls in
+this phase. An AI-extracted bill total or diagnosis string is *evidence*
+these deterministic components read, never something they defer a
+financial or coverage decision to.
+
+### Why Policy → Financial → Fraud, and why Fraud runs independently
+Financial calculation genuinely depends on policy evaluation's output
+(sub-limit, copay%, network discount%, whether coverage even applies) —
+there is no meaningful "payable amount" without first knowing what the
+policy says, so `FinancialCalculationService` is skipped whenever
+`PolicyEngine` failed or produced nothing. Fraud analysis has no such
+dependency: same-day claim patterns, monthly claim counts, and
+high-value/auto-manual-review thresholds are meaningful signals regardless
+of whether coverage or a payable amount could be computed for this
+specific claim — a claim that fails policy evaluation for an unrelated
+reason (e.g. a missing extraction field) should still get a fraud read if
+one is possible. `ClaimsPipeline` reflects this directly: fraud analysis
+is attempted unconditionally (skipped only if the agent itself isn't
+configured), while financial calculation's skip condition explicitly
+checks `claim.policy_evaluation_result is not None` first.
+
+### Soft-fail, not hard-stop — a deliberate departure from Phase 2A/2B
+Every Phase 2A stage (claim validation, document verification,
+cross-document validation) can *early-stop* the claim — `status=BLOCKED`,
+downstream stages skipped, because those are prerequisites: there is no
+meaningful policy evaluation for a claim whose documents don't even belong
+to the claimed member. Phase 2C's three stages are different: the
+assignment explicitly scopes final decision generation
+(`APPROVED`/`PARTIAL`/`REJECTED`/`MANUAL_REVIEW`) out of this phase, so
+none of Policy/Financial/Fraud may set a terminal status — they *inform* a
+decision that doesn't exist yet. `ClaimsPipeline._run_soft_stage()` (a new
+sibling to the existing `_run_stage()`) catches any exception from these
+three stages, records `FAILED` in the trace, and leaves the corresponding
+`claim.*_result` field `None` — but `claim.status` stays `PROCESSING` and
+the pipeline keeps going. A `PolicyEngine` failure must never silently
+read as "approved" (nothing reads a `None` result as a pass), and a
+`FinancialCalculationService` failure must never guess a payable amount —
+both failure modes are "we don't know," reported honestly, not "we
+assumed the best case."
+
+### Financial calculation ordering and the "never trust extracted amounts as authoritative" rule
+`FinancialCalculationService.calculate()` follows one fixed order:
+eligible amount → network discount → sub-limit cap → per-claim-limit cap →
+remaining annual-OPD-allowance cap → copay deduction → payable amount.
+Every step is logged into a human-readable `calculation_steps` list so the
+full chain is auditable without re-deriving it. `docs/tradeoffs.md`
+"Financial Calculation Order" documents the reasoning in full, including a
+disclosed, deliberate discrepancy against two of `test_cases.json`'s own
+worked examples (TC006, TC010) that arises from actually applying
+sub-limit/per-claim-limit caps as real caps, per the assignment's literal
+rule list, rather than reverse-engineering what looks like an omission in
+the test data's own reference calculation. An AI-extracted hospital-bill
+total is never substituted for the claimed/eligible amount — a mismatch
+beyond a small tolerance is recorded as a `warnings` entry naming both
+values (see "Bill Amount Reconciliation" in `docs/tradeoffs.md`), never
+silently "corrected."
+
+### Fraud architecture — deterministic thresholds first, AI reserved but unused
+`FraudAnalysisAgent` reads four thresholds from `policy_terms.json`'s
+`fraud_thresholds` (same-day claim count, monthly claim count, high-value,
+auto-manual-review) and counts matching historical claims via
+`ClaimRepository.list_by_member()` (or `submission.claims_history` for
+evaluation fixtures — the same "one shape, two sources" pattern
+`DocumentInputAdapter` established in Phase 2A). `FraudAnalysisResult`
+reserves an `ai_risk_score: Optional[float]` field, deliberately unused
+(`None`) in this phase and deliberately kept separate from
+`deterministic_thresholds_triggered` — a future AI-assisted risk signal
+must never be merged into the deterministic list, so a human reviewer can
+always tell "the policy-defined threshold was crossed" from "the model
+thought this looked suspicious." This phase doesn't add a third AI-calling
+component because every signal the assignment asks for here is already
+exact and policy-defined; an AI call would add cost and a new failure mode
+without a rule it's actually needed to satisfy.
+
+### Scaling considerations
+All three stages are pure computation over already-fetched data (no new
+AI calls, at most one extra DB query for `FraudAnalysisAgent`'s history
+lookup) — they add negligible latency compared to Phase 2A/2B's AI-bound
+stages. `FraudAnalysisAgent.list_by_member()` is a lightweight
+columns-only SQL query (not a full `Claim` reconstruction per historical
+row), scoped to avoid the N+1-ish cost of rehydrating full domain objects
+just to read `date`/`amount`/`provider`. As claim volume grows, the
+same-day/monthly counting queries are the part most worth indexing
+(`member_id` + `treatment_date`) — not addressed here since SQLite/dev
+scale doesn't need it yet, but flagged for whenever PostgreSQL is adopted
+(see Phase 0's SQLite-vs-PostgreSQL trade-off).
+
+### How explainability is preserved
+Same rules as every prior phase (§6): one `STARTED`→`COMPLETED`/`FAILED`/
+`SKIPPED` trace pair per stage, metadata summarising outcomes
+(`covered`/`failed_rules`, `payable_amount`/caps-applied, `risk_level`/
+`flags_count`) — never the full findings list or calculation-steps audit
+trail duplicated into the trace row (those live on the persisted result,
+which already has its own storage lifecycle). The three new
+`_DOWNSTREAM_OF`-driven `SKIPPED` markers (see `docs/component-contracts.md`
+"ClaimsPipeline — Phase 2C stages") mean a claim that stops at, say,
+`CROSS_DOCUMENT_VALIDATION` shows all three Phase 2C stages explicitly
+`SKIPPED` in its trace — never silently absent, which would look
+indistinguishable from "this trace is incomplete."
+
+---
+
 ## Component Map
 
 ### Backend Layers

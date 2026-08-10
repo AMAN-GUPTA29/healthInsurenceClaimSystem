@@ -20,14 +20,17 @@ from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
 from app.agents.document_extraction_agent import DocumentExtractionAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
+from app.agents.fraud_analysis_agent import FraudAnalysisAgent
 from app.ai.providers.base import AIProvider
 from app.ai.providers.factory import create_ai_provider
 from app.config.settings import Settings, get_settings
 from app.pipeline.pipeline import ClaimsPipeline
+from app.policy.policy_engine import PolicyEngine
 from app.policy.policy_repository import PolicyRepository
 from app.repositories.claim_repository import ClaimRepository
 from app.repositories.trace_repository import TraceRepository
 from app.services.document_input_adapter import DocumentInputAdapter
+from app.services.financial_calculation_service import FinancialCalculationService
 from app.storage.document_storage import DocumentStorage, LocalFileDocumentStorage
 
 
@@ -139,12 +142,17 @@ def get_claims_pipeline(
     ai_provider: AIProviderDep,
     policy_repository: PolicyRepositoryDep,
     document_storage: DocumentStorageDep,
+    claim_repository: ClaimRepositoryDep,
 ) -> ClaimsPipeline:
     """
     Builds a fresh ClaimsPipeline per request. Agents are cheap, stateless
     objects (all real state — the AI provider, the loaded policy, document
     storage — is injected, not owned), so there's no benefit to caching the
     pipeline itself the way the singletons above are cached.
+
+    PolicyEngine/FinancialCalculationService/FraudAnalysisAgent (Phase 2C)
+    make no AI calls — only `ai_provider` flows into the two agents that
+    actually need it (document verification/extraction), same as Phase 2A/2B.
     """
     return ClaimsPipeline(
         claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
@@ -157,6 +165,12 @@ def get_claims_pipeline(
         document_extraction_agent=DocumentExtractionAgent(
             ai_provider=ai_provider,
             document_storage=document_storage,
+        ),
+        policy_engine=PolicyEngine(policy_repository=policy_repository),
+        financial_calculation_service=FinancialCalculationService(),
+        fraud_analysis_agent=FraudAnalysisAgent(
+            policy_repository=policy_repository,
+            claim_repository=claim_repository,
         ),
     )
 
