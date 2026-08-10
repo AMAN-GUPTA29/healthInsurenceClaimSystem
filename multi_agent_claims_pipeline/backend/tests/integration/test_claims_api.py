@@ -294,6 +294,53 @@ async def test_submit_claim_tc003_different_patients_detected(client_factory):
 
 
 @pytest.mark.anyio
+async def test_submit_claim_member_identity_mismatch_blocks(client_factory):
+    """
+    Phase 2A identity-validation gap fix, HTTP-level regression — see
+    docs/AI_HANDOFF.md 'Phase 2A identity-validation gap fixed'. EMP001
+    resolves to Rajesh Kumar; both uploaded documents are internally
+    consistent with each other (both "Vikram Joshi") but belong to neither
+    the member nor each other's expected identity. Before the fix this
+    incorrectly returned status=PROCESSING.
+    """
+    data = {
+        "member_id": "EMP001",
+        "policy_id": "PLUM_GHI_2024",
+        "claim_category": "CONSULTATION",
+        "treatment_date": "2024-11-01",
+        "claimed_amount": "1500",
+    }
+    files = [
+        ("documents", ("prescription_vikram.jpg", JPEG_BYTES, "image/jpeg")),
+        ("documents", ("bill_vikram.jpg", JPEG_BYTES, "image/jpeg")),
+    ]
+    ai_responses = [
+        {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "Vikram Joshi", "confidence": 0.95},
+        {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "Vikram Joshi", "confidence": 0.93},
+    ]
+    client = await client_factory(ai_responses)
+
+    response = await client.post("/api/v1/claims", data=data, files=files)
+    assert response.status_code == 201  # succeeds at the API level — a business BLOCKED, not an HTTP error
+    result = response.json()
+
+    assert result["status"] == "BLOCKED"
+    assert result["stopped_at"] == "CROSS_DOCUMENT_VALIDATION"
+    assert "Vikram Joshi" in result["user_message"]
+    assert "Rajesh Kumar" in result["user_message"]
+    assert result["cross_document_validation_result"]["status"] == "BLOCKED"
+
+    claim_id = result["claim_id"]
+    trace_response = await client.get(f"/api/v1/claims/{claim_id}/trace")
+    trace = trace_response.json()
+    cross_doc_events = [e for e in trace["events"] if e["component"] == "CROSS_DOCUMENT_VALIDATION"]
+    assert len(cross_doc_events) >= 1
+    completed = next(e for e in cross_doc_events if e["event_type"] == "COMPLETED")
+    assert completed["metadata"]["status"] == "BLOCKED"
+    assert completed["metadata"]["expected_member_name"] == "Rajesh Kumar"
+
+
+@pytest.mark.anyio
 async def test_submit_claim_rejects_unsupported_file_type(client_factory):
     data = {
         "member_id": "EMP001",

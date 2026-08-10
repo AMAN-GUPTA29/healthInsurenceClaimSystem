@@ -143,6 +143,13 @@ class ClaimsPipeline:
                 remaining=[TraceComponent.DOCUMENT_VERIFICATION, TraceComponent.CROSS_DOCUMENT_VALIDATION],
             )
         claim.validation_result = validation_result
+        # Identity-fix: carry the Member ClaimValidationAgent already
+        # resolved forward onto the claim itself (Claim.member existed but
+        # was previously always None — see docs/AI_HANDOFF.md "Phase 2A
+        # identity-validation gap fixed"), so CrossDocumentValidationAgent
+        # can check documents against it without a second PolicyRepository
+        # lookup.
+        claim.member = validation_result.member
 
         if not validation_result.valid:
             reason = "; ".join(e.message for e in validation_result.errors) or "claim validation failed"
@@ -219,8 +226,18 @@ class ClaimsPipeline:
             cross_result = await self._run_stage(
                 tracer,
                 TraceComponent.CROSS_DOCUMENT_VALIDATION,
-                lambda: self._cross_document_validation_agent.run(doc_result.classifications),
-                metadata_fn=lambda r: {"status": r.status.value, "patient_names": r.patient_names},
+                lambda: self._cross_document_validation_agent.run(
+                    doc_result.classifications, member=claim.member
+                ),
+                metadata_fn=lambda r: {
+                    "status": r.status.value,
+                    "patient_names": r.patient_names,
+                    # Identity-fix: safe, structured signal for reconstructing
+                    # *why* a BLOCKED verdict happened — never the member's
+                    # full record, just the one field relevant here. See
+                    # docs/AI_HANDOFF.md "Phase 2A identity-validation gap fixed".
+                    "expected_member_name": claim.member.name if claim.member else None,
+                },
                 confidence_fn=lambda r: r.confidence,
             )
         except Exception as exc:

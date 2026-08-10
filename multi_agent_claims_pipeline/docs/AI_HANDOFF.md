@@ -32,6 +32,16 @@ COMPLETE — history preserved below)
 > financial calculation, fraud analysis, or any final decision — see
 > "Deliberately not implemented" under the Phase 2B summary below.
 
+> **A Phase 2A gap was found and fixed while testing Phase 2B**:
+> `CrossDocumentValidationAgent` validated documents only against each
+> other, never against the claim's actual member — two internally-
+> consistent wrong documents (e.g. both "Vikram Joshi" on a claim for
+> member Rajesh Kumar) incorrectly passed. Fixed by propagating the
+> already-resolved `Member` from `ClaimValidationAgent` through to
+> `CrossDocumentValidationAgent`, which now checks document ↔ document
+> (unchanged) and document ↔ member (new). See "Phase 2A identity-
+> validation gap fixed" below for the full account.
+
 > **Phase 2A required a correction after its first pass**: the initial
 > implementation's UI only let a member *select a document type* from a
 > dropdown — it never accepted an actual file. That does not satisfy the
@@ -106,6 +116,104 @@ COMPLETE — history preserved below)
 - Frontend `types/index.ts` — TypeScript mirror of the extraction domain models, including the discriminated `ExtractionPayload` union
 - Frontend `ClaimDetail.tsx` — `DocumentCard` gained a collapsed-by-default "Extracted Information" toggle + `ExtractedInfo`, a document-type-specific operations-friendly renderer (never raw JSON)
 - Full contracts in `docs/component-contracts.md`; design rationale in `docs/architecture.md`'s "Document Extraction (Phase 2B)" section
+
+### Phase 2A identity-validation gap fixed (post-hoc fix, found during Phase 2B testing)
+
+**The bug**: `CrossDocumentValidationAgent` validated documents *only*
+against each other, never against the claim's actual member. Two
+documents that agreed with each other always `PASS`ed regardless of who
+they actually belonged to — e.g. member `EMP001` (Rajesh Kumar per
+`policy_terms.json`) submitting two documents both saying "Vikram Joshi"
+incorrectly passed cross-document validation, because the only comparison
+being made was "do these two documents' patient names match each other,"
+and they did.
+
+**Why two internally-consistent wrong documents used to pass**: `ClaimValidationAgent`
+already resolved the submitted `member_id` to a real `Member` (name
+included) via `PolicyRepository.get_member()` — but only checked `is
+None` (member exists?) and then **discarded** the resolved object. It was
+never stored anywhere, never passed to any later stage.
+`CrossDocumentValidationAgent.run(classifications)` had no parameter through
+which member identity could even reach it — its signature made a
+document-to-member comparison structurally impossible, not just unimplemented.
+`Claim.member: Optional[Member]` existed on the domain model since Phase 0
+but was never populated by anything, anywhere, in the whole pipeline.
+
+**How member identity is now propagated**: `ValidationResult` (`app/domain/verification.py`)
+gained a `member: Optional[Member]` field; `ClaimValidationAgent` now
+returns the `Member` it already resolved instead of discarding it (no
+second `PolicyRepository` lookup). `ClaimsPipeline.run()` copies it onto
+`claim.member` right after Stage 1 (`claim.member = validation_result.member`)
+— the same, previously-always-`None` field Phase 0 already reserved for
+exactly this. Stage 3's call site now passes it through:
+`self._cross_document_validation_agent.run(doc_result.classifications, member=claim.member)`.
+
+**How document ↔ member validation works**: `CrossDocumentValidationAgent.run()`
+gained an optional, keyword-only `member: Optional[Member] = None`
+parameter (default `None` — every pre-fix caller, including the
+evaluation runner, is unaffected). It now performs, in order:
+1. **Document ↔ document** (unchanged, existing logic, checked first) — if
+   the documents don't even agree with each other, that's still the
+   reported mismatch, regardless of the member.
+2. **Document ↔ claim member** (new) — once the documents agree with each
+   other (or there's exactly one named document), their shared identity is
+   compared against `member.name`, using the exact same `_normalize_name`
+   case/whitespace-insensitive helper the document-to-document check
+   already used — so `"Rajesh Kumar"` / `"rajesh kumar"` / `" Rajesh Kumar "`
+   are still the same identity, and no fuzzy matching was introduced.
+
+A member mismatch produces a specific, actionable message naming both
+identities (e.g. *"The uploaded documents identify the patient as Vikram
+Joshi, but this claim is for Rajesh Kumar (EMP001). Please upload
+documents belonging to the covered member."*) — never a generic "patient
+mismatch" string. It reuses the existing `CrossDocumentValidationStatus.BLOCKED`
+status and the pipeline's existing early-stop path — no new status, no
+pipeline redesign. `status=BLOCKED`, `stopped_at=CROSS_DOCUMENT_VALIDATION`,
+exactly like the pre-existing document-to-document mismatch case.
+
+**Domain vocabulary considered and deliberately not force-fit**:
+`RejectionReason.PATIENT_NOT_MEMBER` (`app/domain/models.py`) is the
+conceptually-correct label for this scenario, but Phase 2A has no
+`ClaimDecision`/`rejection_reasons` field yet to attach it to (that's
+Phase 3's job) — forcing it in now would mean adding a new field/schema
+change purely to hold an enum value nothing reads yet, which is exactly
+the kind of redesign this fix was scoped to avoid. `DocumentPatientMismatchError`
+(`app/domain/errors.py`) was also considered and deliberately **not**
+raised — consistent with Decision 19 (a correctly-detected `BLOCKED`
+verdict is the agent succeeding at its job, not a failure; raising here
+would incorrectly route through `ClaimsPipeline`'s `FAILED`/degrade path
+instead of the normal early-stop path the existing document-to-document
+mismatch already uses unmodified).
+
+**Regression tests added** (17 new: 9 unit + 2 pipeline integration + 1 API
+integration on top of new test infrastructure): `tests/unit/test_cross_document_validation_agent.py`
+gained `TestOmittedMemberIsFullyBackwardCompatible` (1 test — no `member=`
+passed still behaves exactly as before) and `TestDocumentMemberIdentityMismatch`
+(8 tests: same-wrong-person-blocks, message names both identities
+specifically, correct-member-passes, one-correct-one-wrong-blocks,
+case/whitespace-normalization-passes, existing doc-to-doc mismatch
+unaffected by a supplied member, a single mismatching document also
+blocks, and a dependent member_id is checked against their own name, not
+the primary member's). `tests/integration/test_claims_pipeline.py` gained
+`TestCrossDocumentMemberIdentityMismatch` (2 tests: the full EMP001 +
+"Vikram Joshi"×2 pipeline run reaches `BLOCKED`/`CROSS_DOCUMENT_VALIDATION`
+with both names in the message and safe structured trace metadata, plus a
+regression guard that matching documents still `PASS`). `tests/integration/test_claims_api.py`
+gained `test_submit_claim_member_identity_mismatch_blocks` (the same
+scenario over real HTTP, including asserting the trace endpoint shows the
+`BLOCKED` `CROSS_DOCUMENT_VALIDATION` event with `expected_member_name` in
+its metadata).
+
+**Test results**: 298/298 backend tests pass (286 Phase-2B baseline + 12
+new), 35/35 frontend tests pass (unchanged — no frontend files needed
+modification, since `ClaimDetail.tsx` already renders any `BLOCKED`
+claim's `user_message` generically), `npm run build` clean. TC001/TC002/TC003
+re-run via `scripts/run_eval.py`: still 3/3 PASS, unaffected (TC001/TC002
+never reach cross-document validation; TC003's existing document-to-document
+mismatch is unchanged since check (a) still runs first). No Phase 2B files
+(`app/domain/extraction.py`, `app/agents/document_extraction_agent.py`,
+`app/ai/prompts/*_extraction.py`) were touched by this fix — Phase 2B's own
+33 tests all continued passing untouched, confirming no regression.
 
 ---
 
@@ -307,6 +415,9 @@ Every monetary field in `app/ai/prompts/*_extraction.py`'s schemas is `{"type": 
 ### Decision 30: `ClaimsPipeline`'s extraction agent is optional (`Optional[..] = None`), defaulting to skip
 Adding a required 4th constructor argument to `ClaimsPipeline` would have broken every existing caller — `app/evaluation/runner.py` and every pre-2B pipeline test. Making `document_extraction_agent` optional (`None` → `DOCUMENT_EXTRACTION` recorded `SKIPPED`, not attempted) meant zero existing call sites needed to change, and the evaluation runner (which has no real document bytes for `test_cases.json` fixtures) never has to construct an agent it could never legitimately use anyway (see Decision 25).
 
+### Decision 31: Member identity flows through `ValidationResult`, not a second `PolicyRepository` lookup (Phase 2A identity-fix)
+When propagating the resolved `Member` from `ClaimValidationAgent` to `CrossDocumentValidationAgent`, two options existed: (a) have `ClaimsPipeline` call `PolicyRepository.get_member()` a second time right before Stage 3, or (b) have `ClaimValidationAgent` — which already looked the member up to check existence — carry that same object forward. Chose (b): added `member: Optional[Member]` to `ValidationResult` and `claim.member = validation_result.member` in the pipeline. This avoids a redundant lookup, uses `Claim.member` (a field that existed since Phase 0 but was always `None` — see the identity-fix section above), and keeps "who resolves member identity" a single responsibility instead of splitting it across two call sites that could drift out of sync.
+
 ---
 
 ## Files/Directories Created
@@ -504,7 +615,7 @@ python ../scripts/run_eval.py            # all three
 python ../scripts/run_eval.py TC001      # a single case
 ```
 
-**All tests pass** (286 backend: 241 unit + 45 integration; 35 frontend component tests) — up from Phase 2A's 253 backend / 32 frontend.
+**All tests pass** (298 backend: 250 unit + 48 integration; 35 frontend component tests) — up from Phase 2A's 253 backend / 32 frontend; the 286→298 backend increase is the Phase 2A identity-validation gap fix's 12 new regression tests (see "Phase 2A identity-validation gap fixed" above), not new Phase 2B work.
 
 Verified end-to-end on 2026-08-09 (Phase 2A + Real Document Upload correction):
 `pytest` (253/253 passing), `vitest run` (30/30 passing), `npm run build`
@@ -932,6 +1043,7 @@ above, not just automated tests with fakes.
 18. **NEVER let one document's extraction failure stop the others, or the claim** — `DocumentExtractionAgent.run()` must keep isolating failures per-document (Decision 28); a single AI timeout/rate-limit/parse error must become a `DocumentExtractionFailure`, never propagate and abort the whole claim.
 19. **NEVER add a `null`/nullable-union field to an extraction schema** — Gemini's `response_schema` subset doesn't reliably support it (Decision 8). Use the established sentinel convention instead (`""` strings/dates/amounts, `[]` lists, `"UNCLEAR"` tri-state) and add the corresponding `_empty_to_none`/`_to_decimal`/`_to_tristate_bool` validator in `app/domain/extraction.py`.
 20. **NEVER make `document_extraction_agent` a required `ClaimsPipeline` constructor argument** — it must stay `Optional[...] = None` (Decision 30) so the evaluation runner and any test that predates Phase 2B keeps working unmodified.
+21. **NEVER let `ClaimValidationAgent` resolve a `Member` and then discard it** — this was the root cause of the Phase 2A identity-validation gap (see that section above). The resolved `Member` must keep flowing through `ValidationResult.member` → `Claim.member` → `CrossDocumentValidationAgent`'s `member` parameter (Decision 31). If a future refactor changes how member resolution works, keep this propagation path intact or re-introduce the exact bug that was just fixed.
 
 ---
 

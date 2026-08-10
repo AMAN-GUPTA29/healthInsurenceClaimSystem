@@ -147,6 +147,81 @@ class TestEarlyStopAtDocumentVerification:
         assert TraceComponent.CROSS_DOCUMENT_VALIDATION in skipped
 
 
+class TestCrossDocumentMemberIdentityMismatch:
+    """
+    Phase 2A identity-validation gap fix — full pipeline regression.
+    EMP001 resolves to Rajesh Kumar (policy_terms.json). Before the fix,
+    two documents that agreed with *each other* (both "Vikram Joshi")
+    incorrectly PASSED, since CrossDocumentValidationAgent never compared
+    against the claim's actual member. See docs/AI_HANDOFF.md "Phase 2A
+    identity-validation gap fixed".
+    """
+
+    @pytest.mark.anyio
+    async def test_two_internally_consistent_wrong_documents_now_blocks(self, policy_repository):
+        claim = make_claim(
+            member_id="EMP001",  # Rajesh Kumar
+            documents=[
+                DocumentMetadata(file_id="F007", file_name="rx.jpg"),
+                DocumentMetadata(file_id="F008", file_name="bill.jpg"),
+            ],
+        )
+        classifications = {
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Vikram Joshi", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Vikram Joshi", confidence=1.0
+            ),
+        }
+        pipeline = build_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.BLOCKED
+        assert result.stopped_at == "CROSS_DOCUMENT_VALIDATION"
+        assert result.cross_document_validation_result.status == "BLOCKED"
+        assert "Vikram Joshi" in result.user_message
+        assert "Rajesh Kumar" in result.user_message
+
+        # claim.member must actually be populated now (was always None before the fix).
+        assert result.member is not None
+        assert result.member.name == "Rajesh Kumar"
+
+        # Trace: the mismatch is visible, with safe structured metadata —
+        # no raw documents, no full LLM output.
+        cross_doc_events = [e for e in tracer.events if e.component == TraceComponent.CROSS_DOCUMENT_VALIDATION]
+        completed = next(e for e in cross_doc_events if e.event_type == TraceEventType.COMPLETED)
+        assert completed.metadata["status"] == "BLOCKED"
+        assert completed.metadata["expected_member_name"] == "Rajesh Kumar"
+        assert completed.metadata["patient_names"] == {
+            "Prescription": "Vikram Joshi",
+            "Hospital Bill": "Vikram Joshi",
+        }
+
+    @pytest.mark.anyio
+    async def test_documents_matching_the_actual_member_still_pass(self, policy_repository):
+        """Regression guard: the fix must not make correctly-matching
+        claims fail."""
+        claim = make_claim(member_id="EMP001")
+        classifications = {
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+        }
+        pipeline = build_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.PROCESSING
+        assert result.cross_document_validation_result.status == "PASS"
+
+
 class TestGracefulDegradationOnAIFailure:
     """Section 24/45 requirement: an AI provider failure must not crash
     the pipeline, must be recorded in the trace, and must not be silently

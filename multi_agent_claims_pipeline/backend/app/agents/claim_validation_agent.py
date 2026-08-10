@@ -87,4 +87,4 @@ class ClaimValidationAgent(BaseAgent):
                 )
             )
 
-        return ValidationResult(valid=len(errors) == 0, errors=errors, warnings=warnings)
+        return ValidationResult(valid=len(errors) == 0, errors=errors, warnings=warnings, member=member)

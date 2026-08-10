@@ -19,7 +19,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.domain.models import DocumentQuality, DocumentType
+from app.domain.models import DocumentQuality, DocumentType, Member
 from app.domain.trace import AITraceMetadata
 
 # ── Claim Validation ─────────────────────────────────────────────────────────
@@ -40,6 +40,12 @@ class ValidationResult(BaseModel):
     valid: bool
     errors: List[ValidationIssue] = Field(default_factory=list)
     warnings: List[ValidationIssue] = Field(default_factory=list)
+    member: Optional[Member] = Field(
+        default=None,
+        description="The Member resolved from submission.member_id via PolicyRepository.get_member(), "
+        "carried forward so downstream stages (CrossDocumentValidationAgent) don't need a second "
+        "lookup. None if the member_id wasn't found (valid=False in that case anyway).",
+    )
 
 
 # ── Document Classification (AI or fixture-provided) ─────────────────────────
