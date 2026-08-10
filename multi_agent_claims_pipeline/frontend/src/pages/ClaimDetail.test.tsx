@@ -13,6 +13,7 @@ import { ClaimDetail } from './ClaimDetail'
 import { claimsApi } from '../services/api'
 import { useClaimTrace } from '../hooks/useClaimTrace'
 import type {
+  ClaimDecision,
   ClaimResponse,
   DocumentExtractionResult,
   FinancialCalculationResult,
@@ -423,5 +424,235 @@ describe('ClaimDetail — policy/financial/fraud (Phase 2C)', () => {
     await waitFor(() => expect(screen.getByText('HIGH Risk')).toBeInTheDocument())
     expect(screen.getByText('Manual Review Recommended')).toBeInTheDocument()
     expect(screen.getByTestId('fraud-flags')).toHaveTextContent('4 claims exceeds limit of 2.')
+  })
+})
+
+describe('ClaimDetail — decision (Phase 2D)', () => {
+  beforeEach(() => {
+    vi.mocked(claimsApi.get).mockReset()
+    vi.mocked(useClaimTrace).mockReturnValue({ events: [], loading: false, error: null, refetch: vi.fn() })
+  })
+
+  function makeDecision(overrides: Partial<ClaimDecision> = {}): ClaimDecision {
+    return {
+      claim_id: 'CLM-TEST01',
+      member_id: 'EMP001',
+      policy_id: 'PLUM_GHI_2024',
+      category: 'CONSULTATION',
+      treatment_date: '2024-11-01',
+      claimed_amount: 1500,
+      decision: 'APPROVED',
+      approved_amount: 1350,
+      rejection_reasons: [],
+      line_item_decisions: [],
+      reason_code: 'APPROVED_FULL',
+      confidence_score: 0.95,
+      explanation: 'The claim is covered under the applicable policy terms.',
+      member_facing_message: 'Your claim has been approved.',
+      component_traces: [],
+      has_component_failures: false,
+      manual_review_recommended: false,
+      fraud_signals: [],
+      degraded_components: [],
+      decided_at: '2024-11-01T00:00:00Z',
+      ...overrides,
+    }
+  }
+
+  it('renders APPROVED prominently with approved amount and confidence, from real backend values only', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      status: 'DECIDED',
+      decision: makeDecision({
+        explanation_detail: {
+          member_summary: 'Your claim has been approved.',
+          operations_summary: 'Consultation claim approved after 10% copay.',
+          key_reasons: ['Fully covered under policy terms'],
+          deductions: ['10% co-pay: -Rs. 150.00'],
+          policy_findings: ['CONSULTATION_COVERED: PASSED'],
+          warnings: [],
+          source: 'AI',
+          degraded: false,
+          confidence: 0.95,
+          ai_calls: [],
+        },
+      }),
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
+    expect(screen.getByTestId('decision-label')).toHaveTextContent('Approved')
+    expect(screen.getByTestId('decision-approved-amount')).toHaveTextContent('₹1,350.00')
+    expect(screen.getByTestId('decision-confidence')).toHaveTextContent('95%')
+    expect(screen.getByTestId('decision-member-message')).toHaveTextContent('Your claim has been approved.')
+    expect(screen.getByText('Fully covered under policy terms')).toBeInTheDocument()
+    // Explanation was AI-generated — no "fallback" badge should render.
+    expect(screen.queryByText(/deterministic fallback/)).not.toBeInTheDocument()
+  })
+
+  it('renders PARTIAL with line-item breakdown available via operations explanation', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      claim_category: 'DENTAL',
+      status: 'DECIDED',
+      decision: makeDecision({
+        category: 'DENTAL',
+        decision: 'PARTIAL',
+        approved_amount: 8000,
+        reason_code: 'PARTIAL_LINE_ITEM_EXCLUSION',
+        line_item_decisions: [
+          { description: 'Root Canal Treatment', claimed_amount: 8000, approved_amount: 8000, approved: true },
+          {
+            description: 'Teeth Whitening', claimed_amount: 4000, approved_amount: 0, approved: false,
+            rejection_reason: 'EXCLUDED_PROCEDURE', notes: 'Cosmetic',
+          },
+        ],
+      }),
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
+    expect(screen.getByTestId('decision-label')).toHaveTextContent('Partially Approved')
+    expect(screen.getByTestId('decision-approved-amount')).toHaveTextContent('₹8,000.00')
+  })
+
+  it('renders REJECTED with rejection-reason badges', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      status: 'DECIDED',
+      decision: makeDecision({
+        decision: 'REJECTED',
+        approved_amount: 0,
+        reason_code: 'REJECTED_WAITING_PERIOD',
+        rejection_reasons: ['WAITING_PERIOD'],
+        member_facing_message: 'A policy waiting period applies and has not yet elapsed.',
+      }),
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
+    expect(screen.getByTestId('decision-label')).toHaveTextContent('Rejected')
+    expect(screen.getByTestId('decision-approved-amount')).toHaveTextContent('₹0.00')
+    expect(screen.getByText('WAITING PERIOD')).toBeInTheDocument()
+  })
+
+  it('renders MANUAL_REVIEW with a distinct badge', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      status: 'DECIDED',
+      decision: makeDecision({
+        decision: 'MANUAL_REVIEW',
+        approved_amount: 1350,
+        reason_code: 'MANUAL_REVIEW_FRAUD',
+        fraud_signals: ['SAME_DAY_CLAIMS_LIMIT_EXCEEDED'],
+        confidence_score: 0.5,
+      }),
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
+    expect(screen.getByTestId('decision-label')).toHaveTextContent('Manual Review')
+    expect(screen.getByTestId('decision-confidence')).toHaveTextContent('50%')
+  })
+
+  it('shows a fallback badge and degraded-component warning when explanation generation degraded', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      status: 'DECIDED',
+      decision: makeDecision({
+        degraded_components: ['FRAUD_ANALYSIS'],
+        manual_review_recommended: true,
+        explanation_detail: {
+          member_summary: 'Your claim has been approved.',
+          operations_summary: 'Approved; fraud analysis degraded during processing.',
+          key_reasons: [],
+          deductions: [],
+          policy_findings: [],
+          warnings: ['Explanation generated via deterministic fallback — FRAUD_ANALYSIS degraded during processing.'],
+          source: 'FALLBACK',
+          degraded: true,
+          confidence: 0.6,
+          ai_calls: [],
+        },
+      }),
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
+    expect(screen.getByText(/Explanation: deterministic fallback/)).toBeInTheDocument()
+    expect(screen.getByText('Manual Review Recommended')).toBeInTheDocument()
+    expect(screen.getByText(/FRAUD_ANALYSIS degraded during processing/)).toBeInTheDocument()
+  })
+
+  it('does not render a decision section for a BLOCKED claim with no decision', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      status: 'BLOCKED',
+      stopped_at: 'CROSS_DOCUMENT_VALIDATION',
+      user_message: 'The documents appear to belong to different patients.',
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByText('CLM-TEST01')).toBeInTheDocument())
+    expect(screen.queryByTestId('decision-label')).not.toBeInTheDocument()
+    expect(screen.getByText('⚠ Document Problem')).toBeInTheDocument()
+  })
+
+  it('expands the operations explanation on click, showing policy findings and deductions', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      status: 'DECIDED',
+      decision: makeDecision({
+        // Realistically, once ExplanationAgent succeeds the pipeline
+        // overwrites `decision.explanation` with this same
+        // operations_summary text (see pipeline.py Stage 9) — set both
+        // to the same string here, matching that real invariant.
+        explanation: 'Consultation claim approved after 10% copay deduction.',
+        explanation_detail: {
+          member_summary: 'Your claim has been approved.',
+          operations_summary: 'Consultation claim approved after 10% copay deduction.',
+          key_reasons: ['Fully covered'],
+          deductions: ['10% co-pay: -Rs. 150.00'],
+          policy_findings: ['CONSULTATION_COVERED: PASSED'],
+          warnings: [],
+          source: 'AI',
+          degraded: false,
+          confidence: 0.95,
+          ai_calls: [],
+        },
+      }),
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
+    expect(screen.queryByTestId('decision-operations-detail')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId('toggle-operations-explanation'))
+
+    expect(screen.getByTestId('decision-operations-detail')).toHaveTextContent(
+      'Consultation claim approved after 10% copay deduction.'
+    )
+    expect(screen.getByText('CONSULTATION_COVERED: PASSED')).toBeInTheDocument()
+    expect(screen.getByText('10% co-pay: -Rs. 150.00')).toBeInTheDocument()
+  })
+
+  it('still renders the trace section alongside the decision', async () => {
+    vi.mocked(claimsApi.get).mockResolvedValue({
+      ...baseClaim,
+      status: 'DECIDED',
+      decision: makeDecision(),
+    })
+
+    renderAt('CLM-TEST01')
+
+    await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
+    expect(screen.getByText('Trace')).toBeInTheDocument()
   })
 })

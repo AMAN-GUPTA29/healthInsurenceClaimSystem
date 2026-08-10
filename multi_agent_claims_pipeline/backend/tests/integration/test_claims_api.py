@@ -231,7 +231,7 @@ async def test_submit_claim_that_clears_phase_2a(client_factory):
     client = await client_factory(ai_responses)
     response = await client.post("/api/v1/claims", data=data, files=files)
     result = response.json()
-    assert result["status"] == "PROCESSING"
+    assert result["status"] == "DECIDED"
     assert result["stopped_at"] is None
     assert result["document_verification_result"]["status"] == "PASS"
     assert result["cross_document_validation_result"]["status"] == "PASS"
@@ -250,7 +250,30 @@ async def test_submit_claim_that_clears_phase_2a(client_factory):
     assert result["financial_calculation_result"]["payable_amount"] is not None
     assert result["fraud_analysis_result"] is not None
     assert result["fraud_analysis_result"]["risk_level"] in ("LOW", "MEDIUM", "HIGH")
-    assert "decision" not in result  # Phase 2D not implemented — no final-decision field exists yet
+
+    # Phase 2D: clean, fully-covered consultation claim within every limit —
+    # DecisionGenerationAgent should reach APPROVED with the exact payable
+    # amount FinancialCalculationService computed (1500 - 10% copay = 1350),
+    # never a value the LLM could have invented.
+    assert result["decision"] is not None
+    assert result["decision"]["decision"] == "APPROVED"
+    assert result["decision"]["approved_amount"] == result["financial_calculation_result"]["payable_amount"]
+    # Not a strict high-confidence bound: this fixture's hospital bill has
+    # no hospital_name (empty-sentinel extraction response), so PolicyEngine
+    # itself legitimately caps its own confidence at 0.6 (NETWORK_HOSPITAL
+    # WARNING — hospital identity unknown, never assumed either way), which
+    # DecisionGenerationAgent's min()-of-available-scores strategy correctly
+    # propagates. The real thing under test is that this is still >= the
+    # low-confidence/MANUAL_REVIEW threshold, i.e. still a normal APPROVED.
+    assert result["decision"]["confidence_score"] >= 0.5
+    assert result["decision"]["explanation"]
+    assert result["decision"]["member_facing_message"]
+    # ExplanationAgent's real AI call fails in this test (the fake provider
+    # only implements analyze_document, not generate_structured) — that
+    # must degrade to a deterministic fallback, never crash the request or
+    # blank out the explanation fields.
+    assert result["decision"]["explanation_detail"]["source"] == "FALLBACK"
+    assert result["decision"]["explanation_detail"]["degraded"] is True
 
 
 @pytest.mark.anyio
@@ -346,6 +369,10 @@ async def test_submit_claim_member_identity_mismatch_blocks(client_factory):
     assert result["policy_evaluation_result"] is None
     assert result["financial_calculation_result"] is None
     assert result["fraud_analysis_result"] is None
+    # Phase 2D: a BLOCKED claim never gets a fake decision — processing
+    # status = BLOCKED, final decision = null, per the explicit distinction
+    # required for early-stop cases (see docs/architecture.md).
+    assert result["decision"] is None
 
     claim_id = result["claim_id"]
     trace_response = await client.get(f"/api/v1/claims/{claim_id}/trace")
@@ -363,6 +390,10 @@ async def test_submit_claim_member_identity_mismatch_blocks(client_factory):
     assert financial_events[0]["event_type"] == "SKIPPED"
     fraud_events = [e for e in trace["events"] if e["component"] == "FRAUD_ANALYSIS"]
     assert fraud_events[0]["event_type"] == "SKIPPED"
+    decision_events = [e for e in trace["events"] if e["component"] == "DECISION_GENERATION"]
+    assert decision_events[0]["event_type"] == "SKIPPED"
+    explanation_events = [e for e in trace["events"] if e["component"] == "EXPLANATION"]
+    assert explanation_events[0]["event_type"] == "SKIPPED"
 
 
 @pytest.mark.anyio
@@ -444,7 +475,7 @@ async def test_submit_claim_multiple_documents_and_metadata(client_factory):
     assert len(result["documents"]) == 3
     assert result["member_id"] == "EMP001"
     assert result["claim_category"] == "DIAGNOSTIC"
-    assert result["status"] == "PROCESSING"
+    assert result["status"] == "DECIDED"  # Phase 2D: claim reaches a final decision, not just PROCESSING
     assert len(result["extraction_result"]["extractions"]) == 3
 
 
@@ -508,15 +539,15 @@ async def test_extraction_result_survives_a_database_round_trip(client_factory):
 @pytest.mark.anyio
 async def test_policy_financial_fraud_results_survive_a_database_round_trip(client_factory):
     """
-    Restart-persistence guard for Phase 2C, mirroring
+    Restart-persistence guard for Phase 2C/2D, mirroring
     test_extraction_result_survives_a_database_round_trip above: the POST
     response is built from the in-memory Claim the pipeline just produced,
     which would pass even if ClaimRepository never persisted
     policy_evaluation_result_json/financial_calculation_result_json/
-    fraud_analysis_result_json correctly. A separate GET — a fresh
-    ClaimRepository.get_by_id() call, exercising _to_domain()'s
-    rehydration of these three JSON columns — is what actually proves
-    the results survive a server restart.
+    fraud_analysis_result_json/decision_json correctly. A separate GET — a
+    fresh ClaimRepository.get_by_id() call, exercising _to_domain()'s
+    rehydration of these JSON columns — is what actually proves the
+    results survive a server restart.
     """
     data = {
         "member_id": "EMP001",
@@ -555,6 +586,13 @@ async def test_policy_financial_fraud_results_survive_a_database_round_trip(clie
     assert result["fraud_analysis_result"] is not None
     assert result["fraud_analysis_result"] == submitted["fraud_analysis_result"]
     assert result["fraud_analysis_result"]["risk_level"] in ("LOW", "MEDIUM", "HIGH")
+
+    # Phase 2D: the decision (including its nested explanation_detail)
+    # must round-trip exactly too.
+    assert result["decision"] is not None
+    assert result["decision"] == submitted["decision"]
+    assert result["decision"]["decision"] in ("APPROVED", "PARTIAL", "REJECTED", "MANUAL_REVIEW")
+    assert result["decision"]["explanation_detail"] is not None
 
 
 @pytest.mark.anyio

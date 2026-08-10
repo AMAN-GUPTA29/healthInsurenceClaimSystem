@@ -56,6 +56,12 @@ class ClaimORM(Base):
     policy_evaluation_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     financial_calculation_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     fraud_analysis_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    # Phase 2D: the full ClaimDecision (decision/approved_amount/rejection_
+    # reasons/confidence/explanation_detail/...) as one JSON blob — same
+    # claim-level, read-as-a-whole pattern as the three Phase 2C columns
+    # above, not a hybrid/denormalised treatment (see docs/component-
+    # contracts.md "ClaimRepository — Decision persistence" for why).
+    decision_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -16,9 +16,11 @@ from app.domain.fraud import FraudAnalysisResult
 from app.domain.models import (
     Claim,
     ClaimCategory,
+    ClaimDecision,
     ClaimHistoryItem,
     ClaimStatus,
     ClaimSubmission,
+    DecisionType,
     Document,
     DocumentMetadata,
     DocumentProcessingStatus,
@@ -90,6 +92,7 @@ class ClaimRepository(BaseRepository[Claim, str]):
             row.fraud_analysis_result_json = (
                 claim.fraud_analysis_result.model_dump(mode="json") if claim.fraud_analysis_result else None
             )
+            row.decision_json = claim.decision.model_dump(mode="json") if claim.decision else None
             row.created_at = claim.created_at
             row.updated_at = claim.updated_at
 
@@ -170,11 +173,13 @@ class ClaimRepository(BaseRepository[Claim, str]):
         Real persisted claim history for one member — used by
         FraudAnalysisAgent (Phase 2C) for same-day/monthly claim counting.
         Deliberately lightweight: queries `ClaimORM` columns directly
-        rather than reconstructing full `Claim` objects (documents,
-        trace, extraction) that fraud counting doesn't need. `decision`
-        is always None on the returned items — `ClaimORM` has no decision
-        column yet (Phase 2D). Never fabricates history: an unknown or
-        history-free member simply returns an empty list.
+        rather than reconstructing full `Claim` objects (documents, trace,
+        extraction) that fraud counting doesn't need. `decision` is read
+        directly off `row.decision_json` (just the `decision` field, not a
+        full `ClaimDecision` reconstruction) now that Phase 2D populates
+        it — `None` for any claim that hasn't reached a decision yet, never
+        fabricated. Never fabricates history: an unknown or history-free
+        member simply returns an empty list.
         """
         async with get_session() as session:
             stmt = select(ClaimORM).where(ClaimORM.member_id == member_id)
@@ -188,7 +193,11 @@ class ClaimRepository(BaseRepository[Claim, str]):
                     amount=row.claimed_amount,
                     provider=row.hospital_name,
                     category=ClaimCategory(row.claim_category),
-                    decision=None,
+                    decision=(
+                        DecisionType(row.decision_json["decision"])
+                        if row.decision_json and row.decision_json.get("decision")
+                        else None
+                    ),
                 )
                 for row in rows
             ]
@@ -261,6 +270,7 @@ def _to_domain(row: ClaimORM, doc_rows: List[ClaimDocumentORM]) -> Claim:
         fraud_analysis_result=(
             FraudAnalysisResult(**row.fraud_analysis_result_json) if row.fraud_analysis_result_json else None
         ),
+        decision=(ClaimDecision(**row.decision_json) if row.decision_json else None),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

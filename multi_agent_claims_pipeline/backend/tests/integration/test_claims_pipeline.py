@@ -10,14 +10,16 @@ import pytest
 
 from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
+from app.agents.decision_generation_agent import DecisionGenerationAgent
 from app.agents.document_extraction_agent import DocumentExtractionAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
+from app.agents.explanation_agent import ExplanationAgent
 from app.agents.fraud_analysis_agent import FraudAnalysisAgent
 from app.policy.policy_engine import PolicyEngine
 from app.services.financial_calculation_service import FinancialCalculationService
 from app.ai.schemas.ai_schemas import DocumentAnalysisResponse
 from app.domain.errors import AITimeoutError
-from app.domain.models import Claim, ClaimCategory, ClaimStatus, ClaimSubmission, DocumentMetadata
+from app.domain.models import Claim, ClaimCategory, ClaimStatus, ClaimSubmission, DecisionType, DocumentMetadata
 from app.domain.trace import TraceComponent, TraceContext, TraceEventType
 from app.domain.verification import DocumentClassification
 from app.pipeline.pipeline import ClaimsPipeline
@@ -89,9 +91,9 @@ class TestFullPassThroughPhase2A:
         self, policy_repository
     ):
         # build_pipeline() deliberately doesn't pass a document_extraction_agent
-        # or any Phase 2C component (these tests never exercise real AI
-        # extraction or policy/financial/fraud) — all four are legitimately
-        # SKIPPED in that case, not a failure.
+        # or any Phase 2C/2D component (these tests never exercise real AI
+        # extraction, policy/financial/fraud, or decision/explanation) — all
+        # six are legitimately SKIPPED in that case, not a failure.
         claim = make_claim()
         classifications = {
             "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
@@ -110,6 +112,8 @@ class TestFullPassThroughPhase2A:
             TraceComponent.POLICY_ENGINE,
             TraceComponent.FINANCIAL_CALCULATION,
             TraceComponent.FRAUD_ANALYSIS,
+            TraceComponent.DECISION_GENERATION,
+            TraceComponent.EXPLANATION,
         }
         assert tracer.events[-1].component == TraceComponent.PIPELINE
         assert tracer.events[-1].event_type == TraceEventType.COMPLETED
@@ -372,7 +376,7 @@ class TestDocumentExtractionStage:
         assert completed.ai_metadata is not None
         assert completed.ai_metadata.provider == "fake"
         # PIPELINE-level completion event must reflect the current phase.
-        assert "2C" in tracer.events[-1].message
+        assert "2D" in tracer.events[-1].message
 
     @pytest.mark.anyio
     async def test_one_failed_extraction_does_not_block_the_claim(self, policy_repository):
@@ -426,8 +430,10 @@ class TestDocumentExtractionStage:
 
 
 def build_full_pipeline(policy_repository) -> ClaimsPipeline:
-    """All stages configured, including Phase 2C — none of Policy/Financial/
-    Fraud call AI, so no fake provider is needed here."""
+    """All implemented stages configured, including Phase 2C and Phase 2D —
+    none of Policy/Financial/Fraud/DecisionGeneration call AI, and
+    ExplanationAgent is built with ai_provider=None (deterministic fallback
+    every time), so no fake provider is needed anywhere in this file."""
     return ClaimsPipeline(
         claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
         document_verification_agent=DocumentVerificationAgent(
@@ -437,18 +443,26 @@ def build_full_pipeline(policy_repository) -> ClaimsPipeline:
         policy_engine=PolicyEngine(policy_repository=policy_repository),
         financial_calculation_service=FinancialCalculationService(),
         fraud_analysis_agent=FraudAnalysisAgent(policy_repository=policy_repository),
+        decision_generation_agent=DecisionGenerationAgent(),
+        explanation_agent=ExplanationAgent(ai_provider=None),
     )
 
 
 class TestPolicyFinancialFraudIntegration:
     """Assignment section 35: EMP001/CONSULTATION/Rajesh Kumar prescription
     + bill/claimed 1500 must reach Policy Evaluation, Financial
-    Calculation, and Fraud Analysis, with all three traced. No final
-    decision is asserted — Phase 2D doesn't exist yet."""
+    Calculation, Fraud Analysis, and (Phase 2D) a final decision, with
+    every stage traced."""
 
     @pytest.mark.anyio
     async def test_full_pipeline_reaches_policy_financial_and_fraud(self, policy_repository):
-        claim = make_claim()
+        # hospital_name given so PolicyEngine's network-hospital check
+        # resolves to a definite NOT_APPLICABLE/PASSED finding rather than
+        # a WARNING (unknown hospital) — this test is about a clean,
+        # confident APPROVED path, not about the confidence-penalty
+        # mechanics of an unresolvable hospital name (see
+        # TestDegradedComponentManualReview for that).
+        claim = make_claim(hospital_name="City Clinic, Bengaluru")
         classifications = {
             "F007": DocumentClassification(
                 file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
@@ -462,8 +476,7 @@ class TestPolicyFinancialFraudIntegration:
 
         result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
 
-        assert result.status == ClaimStatus.PROCESSING
-        assert result.decision is None  # Phase 2D not implemented — no final decision yet
+        assert result.status == ClaimStatus.DECIDED
 
         assert result.policy_evaluation_result is not None
         assert result.policy_evaluation_result.coverage_category == "CONSULTATION"
@@ -472,12 +485,22 @@ class TestPolicyFinancialFraudIntegration:
         assert result.fraud_analysis_result is not None
         assert result.fraud_analysis_result.risk_level is not None
 
+        # Phase 2D: a clean CONSULTATION claim within every limit reaches
+        # APPROVED, with the exact deterministic payable amount.
+        assert result.decision is not None
+        assert result.decision.decision == DecisionType.APPROVED
+        assert result.decision.approved_amount == result.financial_calculation_result.payable_amount
+        assert result.decision.explanation_detail is not None
+        assert result.decision.explanation_detail.source.value == "FALLBACK"  # no AI provider in this test
+
         components_completed = {
             e.component for e in tracer.events if e.event_type == TraceEventType.COMPLETED
         }
         assert TraceComponent.POLICY_ENGINE in components_completed
         assert TraceComponent.FINANCIAL_CALCULATION in components_completed
         assert TraceComponent.FRAUD_ANALYSIS in components_completed
+        assert TraceComponent.DECISION_GENERATION in components_completed
+        assert TraceComponent.EXPLANATION in components_completed
         assert TraceEventType.FAILED not in {e.event_type for e in tracer.events}
 
 
@@ -485,7 +508,8 @@ class TestPhase2AFixStillEarlyStopsBeforePhase2C:
     """Assignment section 36 — regression guard: EMP001 (Rajesh Kumar) with
     two "Vikram Joshi" documents must still stop at CROSS_DOCUMENT_VALIDATION
     (Phase 2A identity fix), and PolicyEngine/FinancialCalculationService/
-    FraudAnalysisAgent must never run."""
+    FraudAnalysisAgent/DecisionGenerationAgent/ExplanationAgent must never
+    run — a BLOCKED claim never gets a fake decision (Phase 2D)."""
 
     @pytest.mark.anyio
     async def test_member_identity_mismatch_blocks_before_policy_financial_fraud(self, policy_repository):
@@ -513,16 +537,21 @@ class TestPhase2AFixStillEarlyStopsBeforePhase2C:
         assert result.policy_evaluation_result is None
         assert result.financial_calculation_result is None
         assert result.fraud_analysis_result is None
+        assert result.decision is None
 
         started_components = {e.component for e in tracer.events if e.event_type == TraceEventType.STARTED}
         assert TraceComponent.POLICY_ENGINE not in started_components
         assert TraceComponent.FINANCIAL_CALCULATION not in started_components
         assert TraceComponent.FRAUD_ANALYSIS not in started_components
+        assert TraceComponent.DECISION_GENERATION not in started_components
+        assert TraceComponent.EXPLANATION not in started_components
 
         skipped_components = {e.component for e in tracer.events if e.event_type == TraceEventType.SKIPPED}
         assert TraceComponent.POLICY_ENGINE in skipped_components
         assert TraceComponent.FINANCIAL_CALCULATION in skipped_components
         assert TraceComponent.FRAUD_ANALYSIS in skipped_components
+        assert TraceComponent.DECISION_GENERATION in skipped_components
+        assert TraceComponent.EXPLANATION in skipped_components
 
 
 class TestPolicyEngineFailureDegradesGracefully:
@@ -569,3 +598,298 @@ class TestPolicyEngineFailureDegradesGracefully:
         financial_events = [e for e in tracer.events if e.component == TraceComponent.FINANCIAL_CALCULATION]
         assert any(e.event_type == TraceEventType.SKIPPED for e in financial_events)
         assert "policy evaluation could not be completed" in result.user_message
+
+
+# ── Phase 2D: Decision Generation & Explanation ─────────────────────────────
+#
+# These reuse build_full_pipeline() (real PolicyEngine/FinancialCalculation
+# Service/FraudAnalysisAgent/DecisionGenerationAgent, ExplanationAgent with
+# no AI provider) — extraction is never configured in this file (Decision
+# 30's backward-compat "skip, don't clobber"), so a test that needs
+# PolicyEngine to see a diagnosis/line-items pre-populates
+# `claim.extraction_result` directly before calling `pipeline.run()`,
+# exactly like docs/AI_HANDOFF.md's fixture-based Phase 2C verification did.
+
+from datetime import date as _date  # noqa: E402
+from decimal import Decimal as _Decimal  # noqa: E402
+
+from app.domain.extraction import (  # noqa: E402
+    ClaimExtractionResult as _ClaimExtractionResult,
+    DocumentExtractionResult as _DocumentExtractionResult,
+    HospitalBillExtraction as _HospitalBillExtraction,
+    LineItem as _LineItem,
+    PrescriptionExtraction as _PrescriptionExtraction,
+)
+from app.domain.models import DocumentQuality as _DocumentQuality  # noqa: E402
+
+
+class TestDecisionReachesPartialForLineItemExclusion:
+    """TC006-shaped: a DENTAL claim with one covered and one excluded
+    (cosmetic) line item must reach PARTIAL, not REJECTED — the per-line-
+    item exclusion flag must not be treated as a whole-claim rejection."""
+
+    @pytest.mark.anyio
+    async def test_dental_claim_with_cosmetic_exclusion_is_partial(self, policy_repository):
+        claim = make_claim(
+            claim_category=ClaimCategory.DENTAL,
+            claimed_amount=_Decimal("12000"),
+            documents=[
+                DocumentMetadata(file_id="F011", file_name="dental_bill.pdf"),
+            ],
+        )
+        claim.extraction_result = _ClaimExtractionResult(
+            extractions=[
+                _DocumentExtractionResult(
+                    file_id="F011", document_type="HOSPITAL_BILL", quality=_DocumentQuality.GOOD,
+                    extraction=_HospitalBillExtraction(
+                        hospital_name="Smile Dental Clinic",
+                        line_items=[
+                            _LineItem(description="Root Canal Treatment", amount=_Decimal("8000")),
+                            _LineItem(description="Teeth Whitening", amount=_Decimal("4000")),
+                        ],
+                        total=_Decimal("12000"), confidence=0.95, warnings=[], evidence=[],
+                    ),
+                )
+            ],
+            failures=[], skipped=[], confidence=0.95, has_failures=False,
+        )
+        classifications = {
+            "F011": DocumentClassification(file_id="F011", document_type="HOSPITAL_BILL", confidence=1.0),
+        }
+        pipeline = build_full_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.DECIDED
+        assert result.decision.decision == DecisionType.PARTIAL
+        # NOT 8000 (the eligible non-excluded amount): the global
+        # per_claim_limit (Rs.5000) is applied as a real cap in this
+        # implementation, same disclosed Decision-35 discrepancy already
+        # documented for TC006 in docs/tradeoffs.md — the DECISION here
+        # (PARTIAL) matches the assignment's own expectation even though
+        # the exact amount does not.
+        assert result.decision.approved_amount == _Decimal("5000.00")
+        assert len(result.decision.line_item_decisions) == 2
+
+
+class TestDecisionReachesRejectedForWaitingPeriod:
+    """TC005-shaped: a diabetes diagnosis within the 90-day specific-
+    condition waiting period must reach REJECTED with WAITING_PERIOD."""
+
+    @pytest.mark.anyio
+    async def test_diabetes_within_waiting_period_is_rejected(self, policy_repository):
+        claim = make_claim(
+            member_id="EMP005",
+            claim_category=ClaimCategory.CONSULTATION,
+            treatment_date=_date(2024, 10, 15),
+            claimed_amount=_Decimal("3000"),
+            hospital_name="Mehta Endocrine Clinic",
+            documents=[
+                DocumentMetadata(file_id="F009", file_name="rx.jpg"),
+                DocumentMetadata(file_id="F010", file_name="bill.jpg"),
+            ],
+        )
+        claim.extraction_result = _ClaimExtractionResult(
+            extractions=[
+                _DocumentExtractionResult(
+                    file_id="F009", document_type="PRESCRIPTION", quality=_DocumentQuality.GOOD,
+                    extraction=_PrescriptionExtraction(
+                        diagnosis="Type 2 Diabetes Mellitus", confidence=0.95, warnings=[], evidence=[],
+                    ),
+                )
+            ],
+            failures=[], skipped=[], confidence=0.95, has_failures=False,
+        )
+        classifications = {
+            "F009": DocumentClassification(
+                file_id="F009", document_type="PRESCRIPTION", patient_name="Vikram Joshi", confidence=1.0
+            ),
+            "F010": DocumentClassification(
+                file_id="F010", document_type="HOSPITAL_BILL", patient_name="Vikram Joshi", confidence=1.0
+            ),
+        }
+        pipeline = build_full_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.DECIDED
+        assert result.decision.decision == DecisionType.REJECTED
+        assert result.decision.approved_amount == _Decimal("0")
+        from app.domain.models import RejectionReason as _RejectionReason
+        assert _RejectionReason.WAITING_PERIOD in result.decision.rejection_reasons
+
+
+class TestDecisionReachesManualReviewForFraud:
+    """TC009-shaped: same-day claim history (fixture-supplied via
+    submission.claims_history) exceeding the deterministic threshold must
+    reach MANUAL_REVIEW, with the financial figure still surfaced."""
+
+    @pytest.mark.anyio
+    async def test_same_day_claims_over_limit_is_manual_review(self, policy_repository):
+        from app.domain.models import ClaimHistoryItem
+
+        claim = make_claim(
+            member_id="EMP008",
+            claim_category=ClaimCategory.CONSULTATION,
+            treatment_date=_date(2024, 10, 30),
+            claimed_amount=_Decimal("4800"),
+            documents=[
+                DocumentMetadata(file_id="F017", file_name="rx.jpg"),
+                DocumentMetadata(file_id="F018", file_name="bill.jpg"),
+            ],
+        )
+        claim.submission.claims_history = [
+            ClaimHistoryItem(claim_id="CLM_0081", date=_date(2024, 10, 30), amount=_Decimal("1200"), provider="City Clinic A"),
+            ClaimHistoryItem(claim_id="CLM_0082", date=_date(2024, 10, 30), amount=_Decimal("1800"), provider="City Clinic B"),
+            ClaimHistoryItem(claim_id="CLM_0083", date=_date(2024, 10, 30), amount=_Decimal("2100"), provider="Wellness Center"),
+        ]
+        classifications = {
+            "F017": DocumentClassification(file_id="F017", document_type="PRESCRIPTION", confidence=1.0),
+            "F018": DocumentClassification(file_id="F018", document_type="HOSPITAL_BILL", confidence=1.0),
+        }
+        pipeline = build_full_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.DECIDED
+        assert result.decision.decision == DecisionType.MANUAL_REVIEW
+        assert result.decision.reason_code == "MANUAL_REVIEW_FRAUD"
+        assert result.decision.approved_amount is not None  # reliable financial figure still surfaced
+
+
+class TestDecisionGenerationFailureDegradesGracefully:
+    """A genuine, unexpected exception inside DecisionGenerationAgent must
+    never leave `claim.decision` empty — the pipeline falls back to a
+    conservative MANUAL_REVIEW decision, records FAILED in the trace, and
+    still completes (never crashes/propagates)."""
+
+    @pytest.mark.anyio
+    async def test_decision_generation_exception_yields_fallback_decision(self, policy_repository):
+        class _FailingDecisionAgent:
+            async def run(self, claim):
+                raise RuntimeError("simulated DecisionGenerationAgent failure")
+
+        claim = make_claim()
+        classifications = {
+            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
+            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+        }
+        pipeline = ClaimsPipeline(
+            claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
+            document_verification_agent=DocumentVerificationAgent(
+                ai_provider=None, policy_repository=policy_repository
+            ),
+            cross_document_validation_agent=CrossDocumentValidationAgent(),
+            policy_engine=PolicyEngine(policy_repository=policy_repository),
+            financial_calculation_service=FinancialCalculationService(),
+            fraud_analysis_agent=FraudAnalysisAgent(policy_repository=policy_repository),
+            decision_generation_agent=_FailingDecisionAgent(),
+            explanation_agent=ExplanationAgent(ai_provider=None),
+        )
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.decision is not None
+        assert result.decision.decision == DecisionType.MANUAL_REVIEW
+        assert result.decision.reason_code == "MANUAL_REVIEW_DECISION_GENERATION_FAILED"
+        assert result.status == ClaimStatus.DECIDED
+
+        decision_events = [e for e in tracer.events if e.component == TraceComponent.DECISION_GENERATION]
+        assert any(e.event_type == TraceEventType.FAILED for e in decision_events)
+        assert TraceEventType.FAILED in {
+            e.event_type for e in tracer.events if e.component == TraceComponent.PIPELINE
+        } or result.status == ClaimStatus.DECIDED  # pipeline itself still completes
+
+
+class TestExplanationFailureDegradesGracefully:
+    """A failure INSIDE the pipeline's Explanation stage (defense-in-depth
+    — ExplanationAgent's own contract is "never raise", so this simulates
+    a bug bypassing that) must never touch the decision already produced
+    by DecisionGenerationAgent."""
+
+    @pytest.mark.anyio
+    async def test_explanation_exception_never_touches_the_decision(self, policy_repository):
+        class _FailingExplanationAgent:
+            async def run(self, claim, decision):
+                raise RuntimeError("simulated ExplanationAgent failure")
+
+        claim = make_claim(hospital_name="City Clinic, Bengaluru")
+        classifications = {
+            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
+            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+        }
+        pipeline = ClaimsPipeline(
+            claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
+            document_verification_agent=DocumentVerificationAgent(
+                ai_provider=None, policy_repository=policy_repository
+            ),
+            cross_document_validation_agent=CrossDocumentValidationAgent(),
+            policy_engine=PolicyEngine(policy_repository=policy_repository),
+            financial_calculation_service=FinancialCalculationService(),
+            fraud_analysis_agent=FraudAnalysisAgent(policy_repository=policy_repository),
+            decision_generation_agent=DecisionGenerationAgent(),
+            explanation_agent=_FailingExplanationAgent(),
+        )
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.decision is not None
+        assert result.decision.decision == DecisionType.APPROVED
+        assert result.decision.approved_amount == result.financial_calculation_result.payable_amount
+        # explanation_detail was never populated (Explanation stage failed
+        # before it could be assigned), but the deterministic
+        # explanation/member_facing_message from Stage 8 are untouched.
+        assert result.decision.explanation_detail is None
+        assert result.decision.explanation
+        assert result.decision.member_facing_message
+
+        explanation_events = [e for e in tracer.events if e.component == TraceComponent.EXPLANATION]
+        assert any(e.event_type == TraceEventType.FAILED for e in explanation_events)
+
+
+class TestPhase2DTraceCompleteness:
+    """Assignment point 5 (explainability): a full clean pass must show
+    all 9 pipeline stages plus the PIPELINE start/end events, in order,
+    with no unexplained gaps."""
+
+    @pytest.mark.anyio
+    async def test_full_pass_shows_every_stage_started_and_completed(self, policy_repository):
+        claim = make_claim()
+        classifications = {
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+        }
+        pipeline = build_full_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.DECIDED
+        expected_stages = [
+            TraceComponent.CLAIM_VALIDATION,
+            TraceComponent.DOCUMENT_VERIFICATION,
+            TraceComponent.CROSS_DOCUMENT_VALIDATION,
+            TraceComponent.POLICY_ENGINE,
+            TraceComponent.FINANCIAL_CALCULATION,
+            TraceComponent.FRAUD_ANALYSIS,
+            TraceComponent.DECISION_GENERATION,
+            TraceComponent.EXPLANATION,
+        ]
+        completed = {e.component for e in tracer.events if e.event_type == TraceEventType.COMPLETED}
+        for stage in expected_stages:
+            assert stage in completed, f"{stage} never COMPLETED"
+        assert TraceEventType.FAILED not in {e.event_type for e in tracer.events}
+        assert tracer.events[0].component == TraceComponent.PIPELINE
+        assert tracer.events[0].event_type == TraceEventType.STARTED
+        assert tracer.events[-1].component == TraceComponent.PIPELINE
+        assert tracer.events[-1].event_type == TraceEventType.COMPLETED
+        assert "Phase 2D" in tracer.events[-1].message

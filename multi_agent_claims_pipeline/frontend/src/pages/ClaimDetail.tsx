@@ -10,8 +10,10 @@ import { claimsApi, APIClientError } from '../services/api'
 import { useClaimTrace } from '../hooks/useClaimTrace'
 import { TraceViewer } from '../components/TraceViewer'
 import type {
+  ClaimDecision,
   ClaimResponse,
   ClaimStatus,
+  DecisionType,
   DocumentExtractionResult,
   FinancialCalculationResult,
   FraudAnalysisResult,
@@ -551,6 +553,151 @@ function FraudSection({ result }: { result: FraudAnalysisResult }) {
   )
 }
 
+const DECISION_STYLE: Record<DecisionType, { bg: string; fg: string; border: string; label: string; icon: string }> = {
+  APPROVED: { bg: 'rgba(34,197,94,0.14)', fg: '#86efac', border: 'rgba(34,197,94,0.4)', label: 'Approved', icon: '✓' },
+  PARTIAL: { bg: 'rgba(245,158,11,0.14)', fg: '#fcd34d', border: 'rgba(245,158,11,0.4)', label: 'Partially Approved', icon: '◐' },
+  REJECTED: { bg: 'rgba(239,68,68,0.14)', fg: '#fca5a5', border: 'rgba(239,68,68,0.4)', label: 'Rejected', icon: '✕' },
+  MANUAL_REVIEW: { bg: 'rgba(168,85,247,0.14)', fg: '#d8b4fe', border: 'rgba(168,85,247,0.4)', label: 'Manual Review', icon: '⧗' },
+  PENDING: { bg: 'rgba(100,116,139,0.14)', fg: '#94a3b8', border: 'rgba(100,116,139,0.4)', label: 'Pending', icon: '○' },
+}
+
+/**
+ * The final decision — deliberately the most visually prominent section on
+ * the page (large badge, headline approved amount/confidence), per the
+ * Phase 2D requirement that a member/reviewer immediately understands
+ * "what happened to my claim?" without reading the trace. Every number
+ * here (`approved_amount`, `confidence_score`) comes straight from
+ * `ClaimDecision` — DecisionGenerationAgent's deterministic output, never
+ * recalculated or reformatted by anything AI-generated. The explanation
+ * text (member/operations summaries, key reasons, deductions, policy
+ * findings, warnings) comes from `explanation_detail`, which may be
+ * AI-written or a deterministic fallback — `source`/`degraded` always say
+ * which, shown here as a small badge rather than hidden.
+ */
+function DecisionSection({ decision }: { decision: ClaimDecision }) {
+  const [showOperations, setShowOperations] = useState(false)
+  const style = DECISION_STYLE[decision.decision]
+  const detail = decision.explanation_detail
+
+  return (
+    <div style={{ ...CARD, background: style.bg, borderColor: style.border, borderWidth: '2px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '16px', marginBottom: '18px' }}>
+        <div>
+          <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px', fontWeight: 700 }}>
+            Decision
+          </div>
+          <div style={{ fontSize: '30px', fontWeight: 800, color: style.fg, display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <span>{style.icon}</span>
+            <span data-testid="decision-label">{style.label}</span>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '28px' }}>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', marginBottom: '4px' }}>Approved Amount</div>
+            <div data-testid="decision-approved-amount" style={{ fontSize: '22px', fontWeight: 700, color: '#f1f5f9' }}>
+              {fmtAmount(decision.approved_amount)}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', marginBottom: '4px' }}>Confidence</div>
+            <div data-testid="decision-confidence" style={{ fontSize: '22px', fontWeight: 700, color: '#f1f5f9' }}>
+              {Math.round(decision.confidence_score * 100)}%
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+        {decision.rejection_reasons.map(r => (
+          <Badge key={r} text={r.replace(/_/g, ' ')} tone="bad" />
+        ))}
+        {decision.manual_review_recommended && decision.decision !== 'MANUAL_REVIEW' && (
+          <Badge text="Manual Review Recommended" tone="warn" />
+        )}
+        {detail && detail.source === 'FALLBACK' && (
+          <Badge text="Explanation: deterministic fallback (AI unavailable)" tone="neutral" />
+        )}
+      </div>
+
+      {decision.member_facing_message && (
+        <div style={{ marginBottom: '16px' }}>
+          <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px', fontWeight: 700 }}>
+            What this means for you
+          </div>
+          <p data-testid="decision-member-message" style={{ margin: 0, color: '#e2e8f0', fontSize: '14px', lineHeight: 1.6 }}>
+            {decision.member_facing_message}
+          </p>
+        </div>
+      )}
+
+      {detail && detail.key_reasons.length > 0 && (
+        <div style={{ marginBottom: '16px' }}>
+          <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px', fontWeight: 700 }}>
+            Key Reasons
+          </div>
+          <ul style={{ margin: 0, paddingLeft: '18px', color: '#cbd5e1', fontSize: '13px' }}>
+            {detail.key_reasons.map((r, i) => (
+              <li key={i}>{r.replace(/_/g, ' ')}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {detail && detail.next_action && (
+        <div style={{ marginBottom: '16px' }}>
+          <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px', fontWeight: 700 }}>
+            Next Action
+          </div>
+          <p style={{ margin: 0, color: '#e2e8f0', fontSize: '13px' }}>{detail.next_action}</p>
+        </div>
+      )}
+
+      {detail && detail.warnings.length > 0 && (
+        <div style={{ background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)', borderRadius: '6px', padding: '8px 10px', marginBottom: '16px' }}>
+          {detail.warnings.map((w, i) => (
+            <div key={i} style={{ fontSize: '12px', color: '#fcd34d' }}>⚠ {w}</div>
+          ))}
+        </div>
+      )}
+
+      <button
+        type="button"
+        data-testid="toggle-operations-explanation"
+        onClick={() => setShowOperations(v => !v)}
+        style={{ background: 'none', border: 'none', color: '#a5b4fc', fontSize: '12px', fontWeight: 600, cursor: 'pointer', padding: 0 }}
+      >
+        {showOperations ? '▾' : '▸'} Operations explanation
+      </button>
+      {showOperations && (
+        <div data-testid="decision-operations-detail" style={{ marginTop: '12px', fontSize: '13px', color: '#cbd5e1', lineHeight: 1.6 }}>
+          <p style={{ margin: '0 0 10px' }}>{decision.explanation ?? detail?.operations_summary}</p>
+          {detail && detail.policy_findings.length > 0 && (
+            <>
+              <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', marginBottom: '4px' }}>Policy findings referenced</div>
+              <ul style={{ margin: '0 0 10px', paddingLeft: '18px' }}>
+                {detail.policy_findings.map((f, i) => <li key={i}>{f}</li>)}
+              </ul>
+            </>
+          )}
+          {detail && detail.deductions.length > 0 && (
+            <>
+              <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', marginBottom: '4px' }}>Deductions</div>
+              <ul style={{ margin: '0 0 10px', paddingLeft: '18px' }}>
+                {detail.deductions.map((d, i) => <li key={i}>{d}</li>)}
+              </ul>
+            </>
+          )}
+          {decision.degraded_components.length > 0 && (
+            <p style={{ margin: 0, color: '#fcd34d' }}>
+              ⚠ Degraded components: {decision.degraded_components.join(', ')}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ClaimDetail() {
   const { claimId } = useParams<{ claimId: string }>()
   const [claim, setClaim] = useState<ClaimResponse | null>(null)
@@ -619,6 +766,8 @@ export function ClaimDetail() {
         <StatusBadge status={claim.status} />
       </div>
 
+      {claim.decision && <DecisionSection decision={claim.decision} />}
+
       {hasProblem && claim.user_message && (
         <div
           style={{
@@ -654,7 +803,7 @@ export function ClaimDetail() {
         </div>
       )}
 
-      {!hasProblem && claim.user_message && (
+      {!hasProblem && claim.user_message && !claim.decision && (
         <div style={{ ...CARD, background: 'rgba(34, 197, 94, 0.08)', borderColor: 'rgba(34, 197, 94, 0.3)' }}>
           <p style={{ margin: 0, color: '#bbf7d0', fontSize: '14px' }}>✓ {claim.user_message}</p>
         </div>

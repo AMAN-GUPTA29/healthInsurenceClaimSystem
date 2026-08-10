@@ -18,8 +18,10 @@ from fastapi import Depends
 
 from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
+from app.agents.decision_generation_agent import DecisionGenerationAgent
 from app.agents.document_extraction_agent import DocumentExtractionAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
+from app.agents.explanation_agent import ExplanationAgent
 from app.agents.fraud_analysis_agent import FraudAnalysisAgent
 from app.ai.providers.base import AIProvider
 from app.ai.providers.factory import create_ai_provider
@@ -151,8 +153,9 @@ def get_claims_pipeline(
     pipeline itself the way the singletons above are cached.
 
     PolicyEngine/FinancialCalculationService/FraudAnalysisAgent (Phase 2C)
-    make no AI calls — only `ai_provider` flows into the two agents that
-    actually need it (document verification/extraction), same as Phase 2A/2B.
+    and DecisionGenerationAgent (Phase 2D) make no AI calls — only
+    `ai_provider` flows into the three agents that actually need it
+    (document verification/extraction, and explanation), same as Phase 2A/2B.
     """
     return ClaimsPipeline(
         claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
@@ -172,6 +175,8 @@ def get_claims_pipeline(
             policy_repository=policy_repository,
             claim_repository=claim_repository,
         ),
+        decision_generation_agent=DecisionGenerationAgent(),
+        explanation_agent=ExplanationAgent(ai_provider=ai_provider),
     )
 
 

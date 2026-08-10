@@ -1,10 +1,9 @@
 """
 Claims Pipeline — orchestrates claim validation, document verification,
 cross-document (member-identity) validation, document extraction, policy
-evaluation, financial calculation, and fraud analysis, with early stopping
-on Phase 2A's stages and graceful degradation everywhere. No final
-decision logic yet — see app/agents/ (planned, Phase 2D) for what's still
-missing.
+evaluation, financial calculation, fraud analysis, decision generation, and
+explanation, with early stopping on Phase 2A's stages and graceful
+degradation everywhere.
 
 Planned pipeline stages (full, across all phases):
     1.  ClaimValidationAgent          — ✅ Phase 2A
@@ -14,9 +13,25 @@ Planned pipeline stages (full, across all phases):
     5.  PolicyEngine                  — ✅ Phase 2C (deterministic policy rules)
     6.  FinancialCalculationService   — ✅ Phase 2C (copay, network discount, limits)
     7.  FraudAnalysisAgent            — ✅ Phase 2C (deterministic fraud thresholds)
-    8.  DecisionGenerationAgent       — (planned, Phase 2D)
-    9.  ExplanationAgent              — (planned, Phase 2D)
+    8.  DecisionGenerationAgent       — ✅ Phase 2D (deterministic APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW)
+    9.  ExplanationAgent              — ✅ Phase 2D (real AI, deterministic fallback on failure)
     10. TraceRecorder                 — ✅ Phase 1 (TraceService, injected below)
+
+Phase 2D note — why Decision Generation is NOT soft-fail-to-None like
+Policy/Financial/Fraud, but Explanation degrades to a fallback instead of
+failing the claim: assignment.md point 4 requires every claim that reaches
+this far to end up with a decision (APPROVED/PARTIAL/REJECTED/
+MANUAL_REVIEW) — a `None` `claim.decision` would mean the API has nothing
+to return for "what happened to my claim?", so an (extremely unlikely,
+since the agent is pure deterministic Python with no I/O) exception inside
+DecisionGenerationAgent is caught and replaced with a conservative
+MANUAL_REVIEW fallback (`_fallback_decision`), never left empty. Explanation
+is different: ExplanationAgent's own contract is "never raise" (it catches
+its own AI failures internally and returns a deterministic fallback
+ExplanationResult — see that agent's docstring), so the pipeline's
+try/except around it is defense-in-depth only; either way, a failure here
+never touches the decision already set by Stage 8. See
+docs/architecture.md "Decision Generation & Explanation (Phase 2D)".
 
 Phase 2B note — why extraction runs after cross-document validation, not
 before or in parallel: extraction is the most expensive stage (real
@@ -67,10 +82,12 @@ from typing import Any, Callable, Coroutine, Dict, Optional, Tuple, TypeVar
 
 from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
+from app.agents.decision_generation_agent import DecisionGenerationAgent
 from app.agents.document_extraction_agent import DocumentExtractionAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
+from app.agents.explanation_agent import ExplanationAgent
 from app.agents.fraud_analysis_agent import FraudAnalysisAgent
-from app.domain.models import Claim, ClaimStatus, DocumentProcessingStatus
+from app.domain.models import Claim, ClaimDecision, ClaimStatus, DecisionType, DocumentProcessingStatus
 from app.domain.trace import TraceComponent
 from app.domain.verification import (
     CrossDocumentValidationStatus,
@@ -95,10 +112,45 @@ _PIPELINE_ORDER = [
     TraceComponent.POLICY_ENGINE,
     TraceComponent.FINANCIAL_CALCULATION,
     TraceComponent.FRAUD_ANALYSIS,
+    TraceComponent.DECISION_GENERATION,
+    TraceComponent.EXPLANATION,
 ]
 _DOWNSTREAM_OF = {
     component: _PIPELINE_ORDER[i + 1 :] for i, component in enumerate(_PIPELINE_ORDER)
 }
+
+
+def _fallback_decision(claim: Claim, *, reason: str) -> ClaimDecision:
+    """
+    Last-resort safety net for a genuinely unexpected exception INSIDE
+    DecisionGenerationAgent itself (it is pure deterministic Python with no
+    I/O, so this should be unreachable in practice — but assignment.md
+    point 4 requires every claim that reaches this stage to end up with
+    SOME decision, never a None `claim.decision`). Unlike Policy/Financial/
+    Fraud's soft-fail-to-None pattern, a missing decision here would mean
+    the API has nothing to return for "what happened to my claim" — so
+    this constructs the most conservative possible decision instead of
+    leaving the field empty.
+    """
+    submission = claim.submission
+    return ClaimDecision(
+        claim_id=claim.claim_id,
+        member_id=submission.member_id,
+        policy_id=submission.policy_id,
+        category=submission.claim_category,
+        treatment_date=submission.treatment_date,
+        claimed_amount=submission.claimed_amount,
+        decision=DecisionType.MANUAL_REVIEW,
+        approved_amount=None,
+        reason_code="MANUAL_REVIEW_DECISION_GENERATION_FAILED",
+        confidence_score=0.0,
+        has_component_failures=True,
+        manual_review_recommended=True,
+        degraded_components=["DECISION_GENERATION"],
+        explanation=f"Decision generation failed unexpectedly ({reason}); routed for manual review.",
+        member_facing_message="We weren't able to fully process your claim automatically. A team "
+        "member will review it and get back to you.",
+    )
 
 
 def _final_user_message(
@@ -152,6 +204,8 @@ class ClaimsPipeline:
         policy_engine: Optional[PolicyEngine] = None,
         financial_calculation_service: Optional[FinancialCalculationService] = None,
         fraud_analysis_agent: Optional[FraudAnalysisAgent] = None,
+        decision_generation_agent: Optional[DecisionGenerationAgent] = None,
+        explanation_agent: Optional[ExplanationAgent] = None,
     ) -> None:
         self._claim_validation_agent = claim_validation_agent
         self._document_verification_agent = document_verification_agent
@@ -165,6 +219,8 @@ class ClaimsPipeline:
         self._policy_engine = policy_engine
         self._financial_calculation_service = financial_calculation_service
         self._fraud_analysis_agent = fraud_analysis_agent
+        self._decision_generation_agent = decision_generation_agent
+        self._explanation_agent = explanation_agent
 
     async def run(
         self,
@@ -441,22 +497,104 @@ class ClaimsPipeline:
             )
             claim.fraud_analysis_result = fraud_result
 
-        # ── End of Phase 2C ───────────────────────────────────────────────────
+        # ── Stage 8: Decision Generation (Phase 2D) ─────────────────────────
+        if self._decision_generation_agent is None:
+            await tracer.skipped(
+                TraceComponent.DECISION_GENERATION,
+                "Skipped — no decision generation agent configured for this pipeline",
+            )
+        else:
+            t0_stage = time.monotonic()
+            await tracer.started(TraceComponent.DECISION_GENERATION)
+            try:
+                decision = await self._decision_generation_agent.run(claim)
+            except Exception as exc:
+                await tracer.failed(
+                    TraceComponent.DECISION_GENERATION, exc, duration_ms=(time.monotonic() - t0_stage) * 1000
+                )
+                decision = _fallback_decision(claim, reason=str(exc))
+            else:
+                await tracer.completed(
+                    TraceComponent.DECISION_GENERATION,
+                    duration_ms=(time.monotonic() - t0_stage) * 1000,
+                    confidence=decision.confidence_score,
+                    metadata={
+                        "decision": decision.decision.value,
+                        "approved_amount": (
+                            str(decision.approved_amount) if decision.approved_amount is not None else None
+                        ),
+                        "confidence": decision.confidence_score,
+                        "reason_code": decision.reason_code,
+                        "manual_review_required": decision.decision == DecisionType.MANUAL_REVIEW,
+                        "degraded_components": decision.degraded_components,
+                    },
+                )
+            claim.decision = decision
+            claim.status = ClaimStatus.DECIDED
+
+        # ── Stage 9: Explanation (Phase 2D) ─────────────────────────────────
+        # Only meaningful once a decision exists — skipped (not attempted)
+        # if Decision Generation itself wasn't configured, mirroring
+        # Financial Calculation's dependency on Policy Evaluation above.
+        if claim.decision is None:
+            await tracer.skipped(
+                TraceComponent.EXPLANATION,
+                "Skipped — no decision generation agent configured for this pipeline"
+                if self._decision_generation_agent is None
+                else "Skipped — no decision available",
+            )
+        elif self._explanation_agent is None:
+            await tracer.skipped(
+                TraceComponent.EXPLANATION, "Skipped — no explanation agent configured for this pipeline"
+            )
+        else:
+            t0_stage = time.monotonic()
+            await tracer.started(TraceComponent.EXPLANATION)
+            try:
+                explanation_result = await self._explanation_agent.run(claim, claim.decision)
+            except Exception as exc:
+                # ExplanationAgent's own contract is "never raise" (see its
+                # docstring) — this except is defense-in-depth only, so the
+                # decision itself (already set above) is never put at risk
+                # by anything going wrong in this stage.
+                await tracer.failed(TraceComponent.EXPLANATION, exc, duration_ms=(time.monotonic() - t0_stage) * 1000)
+            else:
+                await tracer.completed(
+                    TraceComponent.EXPLANATION,
+                    duration_ms=(time.monotonic() - t0_stage) * 1000,
+                    confidence=explanation_result.confidence,
+                    metadata={
+                        "source": explanation_result.source.value,
+                        "degraded": explanation_result.degraded,
+                    },
+                    ai_metadata=explanation_result.ai_calls[0] if explanation_result.ai_calls else None,
+                )
+                claim.decision.explanation_detail = explanation_result
+                claim.decision.explanation = explanation_result.operations_summary
+                claim.decision.member_facing_message = explanation_result.member_summary
+
+        # ── End of pipeline ───────────────────────────────────────────────────
         await tracer.completed(
             TraceComponent.PIPELINE,
-            message="Reached end of Phase 2C pipeline — final decision generation is not yet implemented",
+            message="Reached end of Phase 2D pipeline",
             duration_ms=(time.monotonic() - t0) * 1000,
             metadata={
                 "policy_failed": policy_failed,
                 "financial_failed": financial_failed,
                 "fraud_failed": fraud_failed,
+                "decision": claim.decision.decision.value if claim.decision else None,
             },
         )
-        claim.status = ClaimStatus.PROCESSING
         claim.stopped_at = None
-        claim.user_message = _final_user_message(
-            claim, policy_failed=policy_failed, financial_failed=financial_failed, fraud_failed=fraud_failed
-        )
+        if claim.decision is not None:
+            claim.user_message = claim.decision.member_facing_message or _final_user_message(
+                claim, policy_failed=policy_failed, financial_failed=financial_failed, fraud_failed=fraud_failed
+            )
+        else:
+            claim.status = ClaimStatus.PROCESSING
+            claim.user_message = _final_user_message(
+                claim, policy_failed=policy_failed, financial_failed=financial_failed, fraud_failed=fraud_failed
+            )
         claim.processing_time_ms = (time.monotonic() - t0) * 1000
         return claim
 

@@ -110,21 +110,6 @@ export interface LineItemDecision {
   notes?: string
 }
 
-export interface FinancialBreakdown {
-  claimed_amount: number
-  network_discount_percent: number
-  network_discount_amount: number
-  amount_after_network_discount: number
-  copay_percent: number
-  copay_amount: number
-  sub_limit?: number
-  sub_limit_applied: boolean
-  per_claim_limit?: number
-  per_claim_limit_applied: boolean
-  approved_amount: number
-  calculation_steps: string[]
-}
-
 export interface ComponentTrace {
   component_name: string
   status: 'completed' | 'failed' | 'skipped'
@@ -133,6 +118,13 @@ export interface ComponentTrace {
   notes?: string
 }
 
+// Phase 2D — DecisionGenerationAgent's output. `financial_breakdown`
+// references FinancialCalculationResult (defined further down, Phase 2C) —
+// TypeScript resolves interface references regardless of declaration
+// order, so this forward reference is fine. `explanation`/
+// `member_facing_message` are simple derived strings (from
+// `explanation_detail`, once populated); `explanation_detail` carries the
+// full structured write-up.
 export interface ClaimDecision {
   claim_id: string
   member_id: string
@@ -144,23 +136,48 @@ export interface ClaimDecision {
   approved_amount?: number
   rejection_reasons: RejectionReason[]
   line_item_decisions: LineItemDecision[]
-  financial_breakdown?: FinancialBreakdown
+  reason_code?: string
+  financial_breakdown?: FinancialCalculationResult
   confidence_score: number
   explanation?: string
   member_facing_message?: string
+  explanation_detail?: ExplanationResult
   component_traces: ComponentTrace[]
   has_component_failures: boolean
   manual_review_recommended: boolean
   fraud_signals: string[]
+  degraded_components: string[]
   decided_at: string
   processing_time_ms?: number
 }
 
+// ── Explanation (Phase 2D) ───────────────────────────────────────────────────
+//
+// Mirrors app/domain/explanation.py. ExplanationAgent turns the already-
+// final ClaimDecision + its evidence into this structured write-up, using
+// the real configured AIProvider — `source` always tells you whether the
+// text below is AI-generated or a deterministic fallback (used when the
+// LLM call fails or returns something invalid; never a crash).
+
+export type ExplanationSource = 'AI' | 'FALLBACK'
+
+export interface ExplanationResult {
+  member_summary: string
+  operations_summary: string
+  key_reasons: string[]
+  deductions: string[]
+  policy_findings: string[]
+  warnings: string[]
+  next_action?: string
+  source: ExplanationSource
+  degraded: boolean
+  confidence: number
+  ai_calls: AITraceMetadata[]
+}
+
 // ── Claim Processing (Phase 2A) ──────────────────────────────────────────────
 //
-// Mirrors app/domain/verification.py and app/api/v1/schemas.py. No final
-// decision fields here yet — APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW are
-// later phases.
+// Mirrors app/domain/verification.py and app/api/v1/schemas.py.
 
 export interface ValidationIssue {
   code: string
@@ -389,9 +406,11 @@ export interface ClaimExtractionResult {
 //
 // Mirrors app/domain/policy_evaluation.py, app/domain/models.py's
 // FinancialBreakdown, and app/domain/fraud.py. None of these decide
-// APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW — that's Phase 2D's
-// DecisionGenerationAgent, still unimplemented; `financial_calculation_result
-// .payable_amount` is "what would be payable if approved," not an approval.
+// APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW themselves — that's Phase 2D's
+// DecisionGenerationAgent (see ClaimDecision above), which consumes these
+// three results as input; `financial_calculation_result.payable_amount`
+// is still "what would be payable if approved," reused as-is by the
+// decision rather than recalculated.
 
 export type PolicyRuleStatus = 'PASSED' | 'FAILED' | 'WARNING' | 'NOT_APPLICABLE'
 
@@ -526,6 +545,10 @@ export interface ClaimResponse {
   policy_evaluation_result?: PolicyEvaluationResult
   financial_calculation_result?: FinancialCalculationResult
   fraud_analysis_result?: FraudAnalysisResult
+  // Phase 2D — None means "not reached" (claim stopped early — see
+  // `status`/`stopped_at`) or "decision generation not configured for
+  // this pipeline", never a fabricated decision.
+  decision?: ClaimDecision
   created_at: string
   updated_at: string
 }

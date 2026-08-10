@@ -541,6 +541,158 @@ indistinguishable from "this trace is incomplete."
 
 ---
 
+## Decision Generation & Explanation (Phase 2D)
+
+Phase 2D adds the final two pipeline stages — `DecisionGenerationAgent`,
+`ExplanationAgent` — closing the loop assignment.md point 4 requires: a
+claim must reach one of `APPROVED`/`PARTIAL`/`REJECTED`/`MANUAL_REVIEW`,
+with an approved amount, a reason, and a confidence score.
+
+```
+... Fraud Analysis (Phase 2C)
+                │
+                ▼
+    DecisionGenerationAgent (deterministic — combines Policy/Financial/
+    Fraud/Extraction results already computed; makes zero AI calls)
+                │
+                ▼
+    status = DECIDED, claim.decision set (always, even on internal failure)
+                │
+                ▼
+    ExplanationAgent (real AIProvider call, writes up the decision in
+    plain language; never invents/recalculates/overrides anything)
+                │
+                ▼
+    claim.decision.explanation_detail set (AI-written, or a deterministic
+    fallback if the call failed — either way, never empty)
+```
+
+### Deterministic decision authority — why the LLM never decides
+
+The same Core Principle 3 that already governs Policy/Financial/Fraud
+(§ "Deterministic Policy Evaluation" above) extends to the decision
+itself: `DecisionGenerationAgent` makes zero AI calls and performs no
+independent calculation — it is a pure function of `claim.
+policy_evaluation_result`/`financial_calculation_result`/
+`fraud_analysis_result`, all already computed deterministically by Phase
+2C. An LLM choosing `APPROVED` vs `REJECTED`, or inventing an approved
+amount, would mean the single most consequential output of the entire
+system — money paid or not paid to a real person — rests on a
+non-deterministic, unauditable judgment call. That is exactly the "black
+box" outcome assignment.md point 5 rules out. `ExplanationAgent`'s LLM
+call happens **after** the decision already exists and is passed the
+finished `ClaimDecision` as an immutable input it must explain, never
+influence — see `app/ai/prompts/explanation.py`'s system prompt for the
+explicit, enumerated constraints ("do not calculate amounts," "do not
+override the decision," ...) enforcing this boundary at the prompt level,
+backed by Pydantic validation of the response and a deterministic
+fallback if anything about the call can't be trusted.
+
+### Decision precedence — deterministic, not LLM-invented
+
+`DecisionGenerationAgent` implements a fixed, ordered precedence (full
+derivation and worked numbers in `docs/tradeoffs.md` "Decision
+Precedence"): insufficient evidence → `MANUAL_REVIEW`; claim-level policy
+exclusion/waiting-period/pre-authorization-missing (collected together,
+not first-match-wins) → `REJECTED`; fraud-driven manual-review threshold
+→ `MANUAL_REVIEW`; zero payable → `REJECTED`; genuine line-item exclusion
+(DENTAL/VISION only) → `PARTIAL`; otherwise → `APPROVED`; low aggregate
+confidence even at that point → downgrade to `MANUAL_REVIEW` while still
+surfacing the reliable financial figure. Two of the twelve official test
+cases (TC006, TC010) already established in Phase 2C that a policy/
+category limit reduces the payable amount without rejecting the whole
+claim — Phase 2D's precedence is built to be consistent with that
+established behavior rather than special-cased per test case, which
+means one further official case (TC008) produces a different *decision*
+than `test_cases.json`'s own expectation, disclosed in `docs/eval-report.md`
+and `docs/tradeoffs.md` rather than silently patched around.
+
+### Financial ordering is unchanged — Decision Generation only reads the result
+
+`FinancialCalculationService`'s calculation order (discount → limits →
+copay, established in Phase 2C) is not touched by Phase 2D.
+`DecisionGenerationAgent` reads exactly one number from it —
+`payable_amount` — and never recomputes, rounds, or adjusts it. The
+`PARTIAL`/`APPROVED` distinction is based on `eligible_amount` vs.
+`claimed_amount` (whether the *content* of the claim was partially
+ineligible), deliberately not on whether `payable_amount` is merely lower
+than `claimed_amount` — copay and network discount both do that for a
+perfectly normal, fully-`APPROVED` claim (TC004, TC010), so using a raw
+amount comparison would have misclassified them as `PARTIAL`.
+
+### Failure handling — two different guarantees for two different reasons
+
+`DecisionGenerationAgent` and `ExplanationAgent` fail differently on
+purpose:
+
+- **Decision Generation** is pure deterministic Python with no I/O — it
+  should never raise. If it somehow does, the pipeline substitutes a
+  conservative `MANUAL_REVIEW` fallback decision (`_fallback_decision()`)
+  rather than leaving `claim.decision` empty, because assignment.md point
+  4 requires a decision to exist for any claim that reaches this stage —
+  unlike Policy/Financial/Fraud, there is no legitimate "we don't have
+  this result" state once Decision Generation has been attempted.
+- **Explanation** makes a real network call and is expected to fail
+  sometimes (rate limits, timeouts, the SSL/network issue documented in
+  Known Issues). Its entire contract is "never raise" — a single broad
+  `try/except` around evidence-building, the request, and response
+  validation guarantees a valid `ExplanationResult` always comes back,
+  with `source=FALLBACK` distinguishing a degraded response from a
+  genuine AI one. The pipeline's own `try/except` around the call is
+  defense-in-depth only; verified against a real, live SSL failure in
+  this environment (not just a simulated one) — see `docs/AI_HANDOFF.md`
+  "Verification (Phase 2D)".
+
+Either way, a failure in Explanation can never retroactively change or
+invalidate the decision Stage 8 already produced — the two stages are
+sequenced specifically so a later failure cannot corrupt an earlier,
+already-persisted result.
+
+### Confidence strategy
+
+`DecisionGenerationAgent._compute_confidence()` takes the minimum
+confidence across every upstream stage that actually ran (the same
+"never fabricate, minimum wins" convention Phase 2B/2C already
+established for `ClaimExtractionResult`/`PolicyEvaluationResult`), then
+applies an additional penalty for each stage that produced **no result at
+all** (missing is treated as strictly worse than merely low-confidence).
+This is a deterministic, operational heuristic — explicitly not claimed
+to be statistically calibrated — see `docs/tradeoffs.md` "Decision
+Confidence Strategy" for the exact formula, the chosen threshold, and why
+a single degraded non-critical component (Fraud Analysis alone, as in
+TC011) must not by itself force a claim into `MANUAL_REVIEW`.
+
+### Why the LLM is not allowed to calculate financial values
+
+Beyond the general "deterministic authority" principle above: an LLM
+computing money is a compliance and auditability risk specific to
+insurance — every payable-amount figure must be reproducible from
+`policy_terms.json`'s stated rules by a human auditor without needing to
+re-run a model, and a non-deterministic financial calculation would mean
+two audits of the same claim could legitimately disagree. `Financial
+CalculationService` (Phase 2C) already made this guarantee for the
+payable amount; Phase 2D extends it to the final decision built on top of
+that amount, and the explanation LLM is explicitly instructed never to
+restate the approved amount as anything other than the exact figure it
+was given.
+
+### Scaling considerations
+
+Both new stages are pure computation or a single external API call, same
+profile as the rest of the pipeline: `DecisionGenerationAgent` adds
+negligible latency (no I/O). `ExplanationAgent` adds one real LLM call
+per claim — the same latency/cost profile as Phase 2A's classification
+call, and subject to the same not-yet-parallelized, no-retry limitations
+already tracked as Known Issues 11/15/16. At 10x load, the explanation
+call is the one part of this phase worth reconsidering first: batching
+multiple claims' explanations into fewer calls, or making the call
+optional/deferred (compute the decision synchronously, generate the
+explanation asynchronously afterward) would reduce per-claim latency
+without weakening the deterministic guarantees above, since Explanation
+never gates the decision already produced.
+
+---
+
 ## Component Map
 
 ### Backend Layers

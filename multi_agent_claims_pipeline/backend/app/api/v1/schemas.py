@@ -20,6 +20,7 @@ from app.domain.fraud import FraudAnalysisResult
 from app.domain.models import (
     Claim,
     ClaimCategory,
+    ClaimDecision,
     ClaimStatus,
     DocumentProcessingStatus,
     DocumentQuality,
@@ -82,6 +83,17 @@ class ClaimResponse(BaseModel):
     policy_evaluation_result: Optional[PolicyEvaluationResult] = None
     financial_calculation_result: Optional[FinancialBreakdown] = None
     fraud_analysis_result: Optional[FraudAnalysisResult] = None
+    # Phase 2D — same precedent as every *_result field above: reuse the
+    # domain model wholesale rather than flattening its fields onto
+    # ClaimResponse. `decision.decision`/`.approved_amount`/
+    # `.confidence_score`/`.reason_code`/`.explanation` (operations-facing)/
+    # `.member_facing_message` (member-facing)/`.explanation_detail` (the
+    # full structured ExplanationResult) together satisfy every field
+    # assignment.md point 4 requires — see docs/component-contracts.md
+    # "Claim API — Phase 2D fields". None means "not reached" (claim
+    # stopped early — see `status`/`stopped_at`) or "decision generation
+    # not configured for this pipeline" — never a fabricated decision.
+    decision: Optional[ClaimDecision] = None
     created_at: datetime
     updated_at: datetime
 
@@ -126,6 +138,7 @@ class ClaimResponse(BaseModel):
             policy_evaluation_result=claim.policy_evaluation_result,
             financial_calculation_result=claim.financial_calculation_result,
             fraud_analysis_result=claim.fraud_analysis_result,
+            decision=claim.decision,
             created_at=claim.created_at,
             updated_at=claim.updated_at,
         )

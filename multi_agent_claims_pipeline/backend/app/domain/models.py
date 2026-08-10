@@ -349,8 +349,15 @@ class ComponentTrace(BaseModel):
 
 class ClaimDecision(BaseModel):
     """
-    The final output of the claims pipeline for a single claim.
-    This is what the API returns and what gets persisted.
+    The final output of the claims pipeline for a single claim — Phase 0
+    placeholder, filled in by Phase 2D's DecisionGenerationAgent/
+    ExplanationAgent. This is what the API returns and what gets persisted.
+
+    `reason_code`/`degraded_components` were added in Phase 2D alongside
+    the two agents that populate this model; every other field already
+    existed here since Phase 0 and is reused as-is (Phase 2D deliberately
+    does not introduce a parallel decision-result shape — see
+    docs/component-contracts.md "DecisionGenerationAgent").
     """
 
     claim_id: str
@@ -365,6 +372,13 @@ class ClaimDecision(BaseModel):
     approved_amount: Optional[Decimal] = None
     rejection_reasons: List[RejectionReason] = Field(default_factory=list)
     line_item_decisions: List[LineItemDecision] = Field(default_factory=list)
+    reason_code: Optional[str] = Field(
+        default=None,
+        description="Short machine-readable code for the decision path taken, e.g. "
+        "'REJECTED_WAITING_PERIOD', 'MANUAL_REVIEW_FRAUD' — see DecisionGenerationAgent's "
+        "reason-code vocabulary in docs/component-contracts.md. Distinct from `explanation` "
+        "(free-form) and `rejection_reasons` (the closed RejectionReason enum list).",
+    )
 
     # Financial
     financial_breakdown: Optional[FinancialBreakdown] = None
@@ -374,18 +388,33 @@ class ClaimDecision(BaseModel):
         default=1.0,
         ge=0.0,
         le=1.0,
-        description="0.0 = no confidence, 1.0 = maximum confidence. Reduced on component failures.",
+        description="0.0 = no confidence, 1.0 = maximum confidence. Reduced on component failures. "
+        "Deterministic and operational, not statistically calibrated — see docs/tradeoffs.md "
+        "'Decision Confidence Strategy'.",
     )
 
     # Explanation
     explanation: Optional[str] = None
     member_facing_message: Optional[str] = None
+    explanation_detail: Optional["ExplanationResult"] = Field(
+        default=None,
+        description="Phase 2D — the full structured explanation (member/operations summaries, "
+        "key reasons, deductions, policy findings, warnings, next action). `explanation`/"
+        "`member_facing_message` above are simple derived strings from this object, kept for "
+        "backward-compatible simple access — see app/domain/explanation.py.",
+    )
 
     # Observability
     component_traces: List[ComponentTrace] = Field(default_factory=list)
     has_component_failures: bool = False
     manual_review_recommended: bool = False
     fraud_signals: List[str] = Field(default_factory=list)
+    degraded_components: List[str] = Field(
+        default_factory=list,
+        description="TraceComponent values (as strings) for pipeline stages that failed or "
+        "produced no result before decision generation ran, e.g. ['FRAUD_ANALYSIS'] — drives "
+        "both the confidence penalty and `manual_review_recommended`. Empty means a clean run.",
+    )
 
     # Metadata
     decided_at: datetime = Field(default_factory=datetime.utcnow)
@@ -412,6 +441,15 @@ from app.domain.extraction import ClaimExtractionResult  # noqa: E402
 # Same pattern again for the Phase 2C result types.
 from app.domain.policy_evaluation import PolicyEvaluationResult  # noqa: E402
 from app.domain.fraud import FraudAnalysisResult  # noqa: E402
+
+# Same pattern again for Phase 2D's explanation result — ClaimDecision
+# (defined above) references it via a forward reference resolved once this
+# import runs (from __future__ import annotations makes every annotation in
+# this module a lazily-evaluated string, so the forward ref in
+# ClaimDecision.explanation_detail resolves fine as long as this import has
+# executed before any ClaimDecision instance is actually validated, which it
+# has by the time this module finishes importing).
+from app.domain.explanation import ExplanationResult  # noqa: E402
 
 
 def generate_claim_id() -> str:
