@@ -1,0 +1,15 @@
+P: 9. Final Scorecard
+T: ['Metric', 'Result']
+T: ['Official evaluation', '12/12 PASS']
+T: ['Real end-to-end — cases completed', '12/12']
+T: ['Real end-to-end — decision matches official expectation', '12/12']
+T: ['Decision accuracy (official)', '9/9']
+T: ['Amount accuracy (official, cases with a defined amount)', '3/3']
+T: ['AI classification accuracy (real, §4)', '24/24 documents']
+T: ['AI extraction success (real, §4)', '18/18 documents']
+T: ['Explanation — AI-generated / fallback (real, §5)', '9 / 0']
+T: ['Total real AI calls made (§2)', '30']
+P: 10. Known Differences
+P: None. All 12 real end-to-end decisions match the official fixture's expected decision on this run.
+P: TC004 and TC009 previously showed a different decision than expected the first time this evaluation was run, because the database at that point had accumulated claims from earlier testing that the official fixture doesn't account for. Both were rerun with the database state documented in §3 — a clean database for TC004, and the exact 3 prior claims test_cases.json's own fixture assumes for TC009 — and both now match. Nothing in FraudAnalysisAgent, PolicyEngine, FinancialCalculationService, or DecisionGenerationAgent was changed to get there; only the database state the real submission saw was controlled.
+P: No case showed a document classification or extraction difference: every document was classified correctly, every extraction call succeeded, and every explanation call completed (§4, §5).

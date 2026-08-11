@@ -1,0 +1,33 @@
+P: 2.5 TC004
+T: ['Claim', '']
+T: ['Member', 'EMP001']
+T: ['Policy', 'PLUM_GHI_2024']
+T: ['Category', 'CONSULTATION']
+T: ['Treatment date', '2024-11-01']
+T: ['Claimed amount', '₹1,500.00']
+T: ['Documents (real PDFs)', 'F007 (PRESCRIPTION), F008 (HOSPITAL_BILL)']
+T: ['Real claim ID', 'CLM-829FAB41']
+T: ['Wall-clock time', '36.9 s']
+P: Expected vs. actual
+T: ['', '']
+T: ['Expected decision', 'APPROVED']
+T: ['Actual decision', 'APPROVED']
+T: ['Expected amount', '₹1,350.00']
+T: ['Actual amount', '₹1,350.00']
+T: ['Actual confidence', '0.98']
+T: ['Reason code', 'APPROVED_FULL']
+T: ['Result', 'MATCH']
+P: Trace
+T: ['Stage', 'Status', 'Result', 'Duration', 'AI Call']
+T: ['Claim Validation', 'COMPLETED', 'valid = True', '8 ms', '—']
+T: ['Document Verification', 'COMPLETED', 'status = PASS, AI calls = 2', '7.7 s', 'anthropic/claude-sonnet-4-5-20250929, 3.9 s, 3810→136 tok']
+T: ['Cross-Document Validation', 'COMPLETED', 'status = PASS, expected member = Rajesh Kumar', '8 ms', '—']
+T: ['Document Extraction', 'COMPLETED', 'extracted = 2, failures = 0, skipped = 0', '19.4 s', 'anthropic/claude-sonnet-4-5-20250929, 10.6 s, 4121→721 tok']
+T: ['Policy Evaluation', 'COMPLETED', 'covered = True, 11/15 rules passed, exclusion = False, waiting_period = False, pre_auth = False', '9 ms', '—']
+T: ['Financial Calculation', 'COMPLETED', 'claimed = ₹1,500.00, eligible = ₹1,500.00, payable = ₹1,350.00', '7 ms', '—']
+T: ['Fraud Analysis', 'COMPLETED', 'risk = LOW, same-day = 1, monthly = 1, manual review = False', '11 ms', '—']
+T: ['Decision Generation', 'COMPLETED', 'decision = APPROVED, approved = ₹1,350.00, confidence = 0.98, reason = APPROVED_FULL', '11 ms', '—']
+T: ['Explanation', 'COMPLETED', 'source = AI, degraded = False', '9.5 s', 'anthropic/claude-sonnet-4-5-20250929, 9.5 s, 1966→528 tok']
+P: Notes
+P: This case depends on database claim history (FraudAnalysisAgent queries real prior claims for the member). It was rerun with the database state described in §3 — see that section for exactly what was in the database before this submission.
+P: Real run matches the official expected outcome.

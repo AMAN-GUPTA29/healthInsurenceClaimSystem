@@ -1,0 +1,17 @@
+P: 3. Database Configuration for Evaluation
+P: The real end-to-end evaluation is state-dependent for some cases, because FraudAnalysisAgent checks same-day and monthly claim counts against real claim history in the database — a real submission has no way to pass in a claims_history fixture the way the official evaluation does (§1). The database state at the time each case is submitted matters for those checks.
+T: ['Case', 'Database State Required']
+T: ['TC001', 'Clean database']
+T: ['TC002', 'Clean database']
+T: ['TC003', 'Clean database']
+T: ['TC004', 'Clean database — no previous claims for EMP001']
+T: ['TC005', 'Clean database']
+T: ['TC006', 'Clean database']
+T: ['TC007', 'Clean database']
+T: ['TC008', 'Clean database']
+T: ['TC009', "3 prior claims for EMP008 on 2024-10-30 (CLM_0081 ₹1,200 City Clinic A, CLM_0082 ₹1,800 City Clinic B, CLM_0083 ₹2,100 Wellness Center — exactly test_cases.json's own claims_history block for this case)"]
+T: ['TC010', 'Clean database']
+T: ['TC011', 'Clean database']
+T: ['TC012', 'Clean database']
+P: TC004 and TC009 depend on database claim history because fraud analysis uses previous claims. The remaining cases can be evaluated independently with a clean database.
+P: For this report: the database was cleared, then TC004 was submitted alone; the database was cleared again, the 3 TC009 history rows above were inserted directly (via ClaimRepository — the same repository the application already uses, not a new code path), and TC009 was submitted as the real 4th claim. Both reruns are captured in full in §2.
