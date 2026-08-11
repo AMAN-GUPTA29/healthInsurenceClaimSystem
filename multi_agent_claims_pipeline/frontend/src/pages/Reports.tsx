@@ -7,6 +7,7 @@
  * `python scripts/run_eval.py`). Nothing is hardcoded or computed here.
  */
 
+import { Link } from 'react-router-dom'
 import { useEvaluation } from '../hooks/useEvaluation'
 import type { EvalCaseResult } from '../types'
 
@@ -38,6 +39,75 @@ function ResultPill({ passed }: { passed: boolean }) {
     >
       {passed ? '✓ PASS' : '✕ FAIL'}
     </span>
+  )
+}
+
+const COVERAGE_ITEMS = [
+  'Policy rules',
+  'Financial calculations',
+  'Fraud thresholds',
+  'Decision generation',
+  'Decision precedence',
+]
+
+/**
+ * Explains what this report actually exercises, so it's never mistaken
+ * for a live document/AI evaluation — see docs/eval-report.md
+ * "Methodology" for the full backend-side explanation this mirrors.
+ * Purely informational; renders regardless of loading/error/success
+ * state, since it doesn't depend on the evaluation result itself.
+ */
+function MethodologyNote() {
+  return (
+    <div style={{ ...CARD, background: 'rgba(99,102,241,0.06)', borderColor: 'rgba(99,102,241,0.25)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
+        <span style={{ fontSize: '18px' }} aria-hidden="true">🧪</span>
+        <h2 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: '#e2e8f0' }}>
+          Official Deterministic Evaluation
+        </h2>
+        <span
+          style={{
+            marginLeft: 'auto',
+            background: 'rgba(99,102,241,0.15)',
+            color: '#a5b4fc',
+            border: '1px solid rgba(99,102,241,0.3)',
+            borderRadius: '6px',
+            padding: '4px 10px',
+            fontSize: '11px',
+            fontWeight: 700,
+            whiteSpace: 'nowrap',
+          }}
+        >
+          Deterministic benchmark — no live Gemini calls
+        </span>
+      </div>
+      <p style={{ margin: '0 0 14px', fontSize: '13px', color: '#94a3b8', lineHeight: 1.6 }}>
+        Runs the 12 official cases from <code>test_cases.json</code> against the claims-processing
+        pipeline using structured fixture data, not the generated PDF test documents — document
+        verification and extraction are intentionally not part of this benchmark. It checks the
+        system's deterministic decision logic below against each case's expected outcome, so
+        results are exact and repeatable, unaffected by Gemini latency, API availability, or
+        network/SSL issues. For real document upload and AI-assisted processing, use{' '}
+        <Link to="/claims/new" style={{ color: '#a5b4fc', fontWeight: 600 }}>Submit Claim</Link>.
+      </p>
+      <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+        {COVERAGE_ITEMS.map(item => (
+          <span
+            key={item}
+            style={{
+              background: 'rgba(34,197,94,0.1)',
+              color: '#86efac',
+              borderRadius: '6px',
+              padding: '4px 10px',
+              fontSize: '12px',
+              fontWeight: 600,
+            }}
+          >
+            ✓ {item}
+          </span>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -79,7 +149,7 @@ export function Reports() {
             Official Evaluation Report
           </h1>
           <p style={{ margin: 0, color: '#64748b', fontSize: '14px' }}>
-            All 12 official test_cases.json cases, run live through the real pipeline.
+            All 12 official test_cases.json cases, run through the real deterministic pipeline.
           </p>
         </div>
         <button
@@ -99,6 +169,8 @@ export function Reports() {
           {loading ? '⟳ Running...' : '↻ Re-run Evaluation'}
         </button>
       </div>
+
+      <MethodologyNote />
 
       {loading && !report && (
         <div style={{ ...CARD, textAlign: 'center', padding: '40px', color: '#64748b' }}>
@@ -133,7 +205,7 @@ export function Reports() {
           >
             <div>
               <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: '6px' }}>
-                Official Evaluation
+                Evaluation Results
               </div>
               <div style={{ fontSize: '36px', fontWeight: 800, color: report.all_passed ? '#86efac' : '#fca5a5' }}>
                 {report.passed} / {report.total}

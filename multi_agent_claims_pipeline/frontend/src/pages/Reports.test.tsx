@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import '@testing-library/jest-dom'
 import { Reports } from './Reports'
 import { useEvaluation } from '../hooks/useEvaluation'
@@ -14,6 +15,14 @@ import type { EvaluationReportResponse } from '../types'
 vi.mock('../hooks/useEvaluation', () => ({
   useEvaluation: vi.fn(),
 }))
+
+function renderReports() {
+  return render(
+    <MemoryRouter>
+      <Reports />
+    </MemoryRouter>
+  )
+}
 
 const twelvePassReport: EvaluationReportResponse = {
   total: 12,
@@ -38,9 +47,19 @@ describe('Reports', () => {
     vi.mocked(useEvaluation).mockReset()
   })
 
+  it('explains the evaluation is a deterministic, fixture-based benchmark — not live AI/document testing', () => {
+    vi.mocked(useEvaluation).mockReturnValue({ report: null, loading: true, error: null, refetch: vi.fn() })
+    renderReports()
+    expect(screen.getByText('Official Deterministic Evaluation')).toBeInTheDocument()
+    expect(screen.getByText(/no live Gemini calls/)).toBeInTheDocument()
+    expect(screen.getByText(/Policy rules/)).toBeInTheDocument()
+    expect(screen.getByText(/Decision precedence/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Submit Claim' })).toHaveAttribute('href', '/claims/new')
+  })
+
   it('shows a loading state while the evaluation runs', () => {
     vi.mocked(useEvaluation).mockReturnValue({ report: null, loading: true, error: null, refetch: vi.fn() })
-    render(<Reports />)
+    renderReports()
     expect(screen.getByText(/Running all 12 official cases/)).toBeInTheDocument()
   })
 
@@ -51,7 +70,7 @@ describe('Reports', () => {
       error: 'Network error',
       refetch: vi.fn(),
     })
-    render(<Reports />)
+    renderReports()
     expect(screen.getByTestId('reports-error')).toBeInTheDocument()
     expect(screen.getByText(/Unable to load the evaluation report/)).toBeInTheDocument()
   })
@@ -63,7 +82,7 @@ describe('Reports', () => {
       error: null,
       refetch: vi.fn(),
     })
-    render(<Reports />)
+    renderReports()
     expect(screen.getByTestId('eval-summary')).toHaveTextContent('12 / 12')
     expect(screen.getByTestId('eval-summary')).toHaveTextContent('100%')
     expect(screen.getByText(/All cases pass/)).toBeInTheDocument()
@@ -76,7 +95,7 @@ describe('Reports', () => {
       error: null,
       refetch: vi.fn(),
     })
-    render(<Reports />)
+    renderReports()
     const rows = screen.getAllByTestId('eval-case-row')
     expect(rows).toHaveLength(3)
     expect(screen.getByText('TC004')).toBeInTheDocument()
@@ -102,7 +121,7 @@ describe('Reports', () => {
       error: null,
       refetch: vi.fn(),
     })
-    render(<Reports />)
+    renderReports()
     expect(screen.getByTestId('eval-summary')).toHaveTextContent('11 / 12')
     expect(screen.getByText(/1 case\(s\) failing/)).toBeInTheDocument()
     expect(screen.getByText(/expected decision REJECTED, got APPROVED/)).toBeInTheDocument()
