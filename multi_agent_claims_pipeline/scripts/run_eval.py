@@ -26,9 +26,9 @@ from pathlib import Path
 # multi_agent_claims_pipeline/scripts/, the package root is ../backend).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from app.evaluation.runner import EvalResult, run_test_cases  # noqa: E402
+from app.evaluation.runner import ALL_CASE_IDS, EvalResult, run_test_cases  # noqa: E402
 
-DEFAULT_CASE_IDS = [f"TC{n:03d}" for n in range(1, 13)]
+DEFAULT_CASE_IDS = ALL_CASE_IDS
 
 
 def _print_result(result: EvalResult) -> None:

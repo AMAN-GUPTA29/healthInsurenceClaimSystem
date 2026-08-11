@@ -16,15 +16,29 @@ The system evaluates OPD health insurance claims using a multi-agent AI pipeline
 
 ## Current Phase
 
-**Phase 3 — Final Audit, Correctness & Submission Readiness** ✅ COMPLETE
+**Phase 4 — Final Frontend Integration & UI Completion** ✅ COMPLETE
 (Phase 0 — Foundation & Architecture ✅ COMPLETE, Phase 1 — Observability &
 Trace Infrastructure ✅ COMPLETE, Phase 2A — Claim Foundation & Early
 Document Verification, including the Real Document Upload correction and
 the post-hoc member-identity-validation fix, ✅ COMPLETE, Phase 2B —
 Document Extraction & Structured Medical Data ✅ COMPLETE, Phase 2C —
 Policy Engine, Financial Calculation & Fraud Analysis ✅ COMPLETE, Phase
-2D — Decision Generation & Explanation ✅ COMPLETE — history preserved
-below)
+2D — Decision Generation & Explanation ✅ COMPLETE, Phase 3 — Final Audit,
+Correctness & Submission Readiness ✅ COMPLETE — history preserved below)
+
+> **Phase 4 in one sentence**: the frontend had not been touched since
+> Phase 2A and still presented itself as a "Phase 2A prototype" (a
+> Dashboard listing 6 of 10 pipeline stages as "Planned", a disabled
+> "Claim History" nav item, a non-existent Reports page) even though the
+> backend had been Phase 3-complete for the entire session — this phase
+> brought the UI up to date with the real system: a truthful Dashboard
+> (all 10 stages, all "Live"), a real Claim History page and a real
+> Reports page backed by two new minimal read-only backend endpoints
+> (`GET /api/v1/claims` and `GET /api/v1/evaluation` — no business logic
+> added, both simply expose already-existing persisted/computed data),
+> working navigation with no dead links or placeholders, and a
+> repo-wide sweep for stale "Phase 2A"/"Planned"/"Pending" user-facing
+> text. See "Phase 4 Summary" below for the full account.
 
 > **Phase 3 in one sentence**: a full architecture/correctness/security/
 > deployment audit that found and fixed two genuine, generic bugs (the
@@ -784,26 +798,23 @@ python ../scripts/run_eval.py            # all 12
 python ../scripts/run_eval.py TC008      # a single case
 ```
 
-**All tests pass** (417 backend, 46 frontend component tests) — up from
-the Phase 2D baseline of 399 backend / 46 frontend; the +18 backend
-increase is Phase 3's fixes and their regression tests: 3 new
-`PolicyEngine` network-confidence-relevance tests
-(`TestT_NetworkHospitalConfidenceRelevance`), 4 new
-`DecisionGenerationAgent` per-claim-limit-gate tests
-(`TestPerClaimLimitExceededRejected`), 1 new `ClaimsPipeline` integration
-test (`TestDecisionReachesRejectedForPerClaimLimit`, TC008-shaped), the
-`FinancialCalculationService` limit tests rewritten in place for the
-no-cap behavior (net unchanged count), and the evaluation-runner
-regression suite (`test_eval_all_cases.py`, renamed from
-`test_eval_tc001_tc003.py`) extended from 5 tests (3 individual
-TC001-TC003 + 2 trace-shape checks) to 15 (a 12-case parametrized sweep +
-2 trace-shape checks + 1 new TC004 trace-completeness check). See "Phase
-3 Summary" below for the full breakdown. The Phase 2D breakdown (399
-backend / 46 frontend) below is preserved for history; the +8 frontend
-increase from that phase is the new `DecisionSection`'s
-tests (all four decision types, fallback-explanation badge, no-decision-
-for-BLOCKED, expand/collapse). See "Phase 2D Summary" below for the full
-breakdown.
+**All tests pass** (423 backend, 66 frontend component tests) — up from
+the Phase 3 baseline of 417 backend / 46 frontend; the +6 backend
+increase is Phase 4's new endpoint tests (`test_list_claims_*` ×4,
+`test_evaluation_report_*` ×2 in `tests/integration/test_claims_api.py`),
+and the +20 frontend increase is five new/extended test files:
+`Dashboard.test.tsx` (new, 6 tests — pipeline stages all "Live", no
+stale Phase 2A text, real health values, loading/error states,
+navigation links), `ClaimHistory.test.tsx` (new, 5 tests — loading/
+empty/error states, real claims rendered, links to detail),
+`Reports.test.tsx` (new, 5 tests — loading/error states, real 12/12
+summary, per-case table rows, failing-case display), `App.test.tsx`
+(new, 4 tests — every nav link resolves to a real route, no stale
+"Phase 2A" text, clicking nav renders the real target page), and one
+assertion added to `ClaimDetail.test.tsx`'s existing PARTIAL test (the
+new "of X claimed" context line). See "Phase 4 Summary" below for the
+full breakdown. The Phase 3 breakdown (417 backend / 46 frontend) below
+is preserved for history.
 
 Verified end-to-end on 2026-08-09 (Phase 2A + Real Document Upload correction):
 `pytest` (253/253 passing), `vitest run` (30/30 passing), `npm run build`
@@ -1645,6 +1656,9 @@ by a real verification run above, not just automated tests with fakes.
 31. **NEVER make `PolicyEngine`'s `NETWORK_HOSPITAL`-unknown confidence penalty unconditional again** — it must only fire when the category actually has a non-zero `network_discount_percent` AND the claim isn't already headed for a claim-level rejection unrelated to money (see Decision 42). TC012's own expected `confidence_score` (above 0.90) depends on this.
 32. **NEVER re-add Docker without fixing the build-context problem first** — `policy_terms.json`/`test_cases.json` live at the repository root, one level above `multi_agent_claims_pipeline/`; a Dockerfile whose build context is `multi_agent_claims_pipeline/` cannot `COPY` them (see Decision 44). If Docker is reintroduced, the build context must be the repo root (or the files must be supplied purely via volume mount, never `COPY`), and a `.dockerignore` must exist before widening any context to the repo root (which now includes `.git`, both `.venv`s, `node_modules`, and `data/uploads` test artifacts).
 33. **NEVER add `if case_id == "TCxxx"` (or any member-ID/amount-specific) branching anywhere in `app/agents/`, `app/policy/`, or `app/services/`** — every rule in this codebase, including the ones that make all 12 official cases pass, is expressed generically in terms of policy/financial/claim state. `app/evaluation/runner.py` is the one place a case ID may legitimately appear (it's evaluation harness code, not the system under test).
+34. **NEVER hardcode or fabricate claims in `ClaimHistory.tsx`, or evaluation results in `Reports.tsx`** — both pages render exactly what `GET /api/v1/claims`/`GET /api/v1/evaluation` return, nothing more. If either page ever looks "empty" or "wrong" in a demo, fix the backend data or query, never patch the frontend with placeholder rows.
+35. **NEVER let `GET /api/v1/evaluation` cache or reuse a stale result** — it must re-run all 12 cases through the real pipeline on every call (Decision 43's `ALL_CASE_IDS` + `run_test_cases()`), so it always reflects current code. Caching it would risk showing a stale PASS after a real regression.
+36. **NEVER reconstruct a full `Claim` (documents/extraction/trace) inside `ClaimRepository.list_all()`** — it must stay a lightweight, columns-only query (same pattern as `list_by_member()`) since the Claim History list can grow without bound; only `GET /claims/{id}` should ever do a full reconstruction.
 
 ---
 
@@ -1944,14 +1958,182 @@ re-adding Docker.
 
 ---
 
+## Phase 4 Summary (complete)
+
+The backend had been Phase 3-complete (12/12 official evaluation, full
+9-stage pipeline) for the entire session, but the frontend still
+presented itself as the Phase 2A prototype it was built as: `Dashboard.tsx`
+listed 6 of 10 pipeline stages as "Planned" (Data Extraction, Policy
+Evaluation, Fraud Analysis, Financial Calculation, Decision Generation,
+Explanation — all of which had been live since Phase 2C/2D), showed a
+"Phase 2A — Claim Foundation" badge, and `App.tsx`'s sidebar had "Claim
+History" and "Evaluation Report" as disabled, unclickable placeholders
+with no backing routes. Phase 4 closed this gap without touching any
+claims-processing business logic.
+
+**Backend — two new minimal, read-only endpoints, no new business logic**:
+- `GET /api/v1/claims` (list) — `ClaimRepository.list_all()` (new method,
+  same lightweight "query `ClaimORM` columns directly" pattern
+  `list_by_member()` already established) + a new `ClaimSummary` domain
+  model (`app/domain/models.py`) + `ClaimListResponse` schema. Newest
+  first, `limit` query param (default 100, max 500).
+- `GET /api/v1/evaluation` — `app/api/v1/evaluation.py` (new router file),
+  calls `app/evaluation/runner.run_test_cases(ALL_CASE_IDS)` (the exact
+  function `scripts/run_eval.py` already used — `ALL_CASE_IDS` is a new
+  shared constant in `runner.py` so the CLI script and this endpoint
+  can never define "the official 12 cases" differently) and returns
+  expected (from `test_cases.json`, via `get_test_case()`) vs. actual
+  (from the real pipeline run just performed) decision/amount/confidence
+  per case. Computed fresh on every request — cheap (~1-2s, no AI calls,
+  no persistence) and always reflects current code, never a stale cache.
+
+**Frontend — two new pages, two new hooks, one new API-service section,
+five files updated for accuracy**:
+- `pages/ClaimHistory.tsx` (new) + `hooks/useClaims.ts` (new) — a real
+  table of persisted claims (claim ID, member, category, treatment date,
+  claimed/approved amount, status, decision, submitted date), loading/
+  empty/error states, each row linking to `ClaimDetail`.
+- `pages/Reports.tsx` (new) + `hooks/useEvaluation.ts` (new) — the
+  official evaluation summary (`passed/total`, a percentage, a
+  pass/fail banner) and a full per-case table (expected vs. actual
+  decision/amount, PASS/FAIL, failure reasons when present) — every
+  value read directly from `GET /api/v1/evaluation`'s response, nothing
+  computed or hardcoded in React.
+- `pages/Dashboard.tsx` — rewritten: all 10 pipeline stages now listed
+  in their real pipeline order, all shown "✅ Live" (none "Planned"),
+  the stale "Phase 2A — Claim Foundation" / "Policy Evaluation Pending"
+  badges replaced with "Full Pipeline Active" / "10 / 10 Stages Live",
+  and three new quick-link cards to Submit Claim / Claim History /
+  Evaluation Report.
+- `App.tsx` — "Claim History" and "Evaluation Report" nav items are now
+  real `NavLink`s to working routes (`/claims`, `/reports`); the sidebar
+  footer's stale "Phase 2A / Claim Foundation & Document Verification"
+  replaced with a live "✅ Full Pipeline Active" status line.
+- `pages/ClaimSubmission.tsx` — fixed one stale, user-facing sentence
+  ("Phase 2A does not generate a policy decision yet") that was simply
+  false — the pipeline has produced full decisions since Phase 2D.
+- `pages/ClaimDetail.tsx` — two small, additive polish changes (not a
+  rebuild, per the phase's explicit "don't rebuild it unnecessarily"
+  instruction, since the page already had every Phase 2D/3 section):
+  the header now formats `claimed_amount` through the same `fmtAmount()`
+  helper as everywhere else, and a `PARTIAL` decision now shows
+  "of ₹X claimed" under the approved amount, per the assignment's own
+  example format.
+- `services/api.ts`/`types/index.ts` — `claimsApi.list()`, `evaluationApi.
+  getReport()`, and the `ClaimSummary`/`ClaimListResponse`/
+  `EvalCaseResult`/`EvaluationReportResponse` types (mirroring the new
+  backend schemas exactly — no `any` anywhere). Stale "(Phase 2A)"
+  section comments in both files updated to describe current behavior.
+
+**Repo-wide stale-text sweep** (assignment Step 20): searched all of
+`frontend/src/` for `phase 2a|phase 2b|phase 2c|planned|pending|coming
+soon|mock|todo`. Every remaining hit is a legitimate internal comment
+(a `describe()` block label noting which phase introduced a test, a
+`// Phase 2B:` section-header comment in `types/index.ts` documenting
+when a type was added, or the real `DocumentProcessingStatus.PENDING`/
+`ClaimStatus.DOCUMENTS_PENDING` backend enum values) — none are
+user-facing UI text. Nothing was removed from historical documentation
+(`docs/`, this file) — only stale *product* UI copy was changed.
+
+**Tests**: 4 new backend integration tests (list-claims: empty database,
+real submitted claims, newest-first ordering, limit) + 2 new backend
+integration tests (evaluation report: runs all 12 cases, expected/actual
+values populated correctly) in `tests/integration/test_claims_api.py`.
+4 new frontend test files (`Dashboard.test.tsx`, `ClaimHistory.test.tsx`,
+`Reports.test.tsx`, `App.test.tsx`) + 1 new assertion in
+`ClaimDetail.test.tsx`'s existing PARTIAL test. 423 backend / 66
+frontend total, `tsc --noEmit` clean, `npm run build` clean.
+
+**Verification**: the official evaluation was re-run and remains
+**12/12** (Phase 4 touched zero claims-processing logic). A full,
+genuine end-to-end flow was verified via direct HTTP calls against a
+live `uvicorn` + `vite dev` pair (submit a real claim with real PDF
+uploads → appears correctly in `GET /api/v1/claims` → full detail via
+`GET /api/v1/claims/{id}` → full trace via `GET /api/v1/claims/{id}/trace`
+→ all three byte-identical after an actual backend process
+kill-and-restart) — see "Verification (Phase 4)" below, including an
+important honesty note about what could and could not be checked
+without a visual browser tool in this environment.
+
+Explicitly NOT done in Phase 4 (out of scope, and per the user's "STOP
+after Phase 4" instruction): any change to `app/agents/`, `app/policy/`,
+`app/pipeline/`, or `app/services/` (the claims-processing core);
+demo video; deployment; a design-system rewrite (the existing inline-
+style dark theme was kept, per the phase's own "keep the existing visual
+identity" instruction).
+
+---
+
+## Verification (Phase 4) — ✅ VERIFIED 2026-08-11
+
+**Important honesty note**: this tool environment has no visual browser/
+screenshot capability — Step 18's 19-point manual browser checklist
+could not be performed as a literal pixel-by-pixel click-through. What
+was actually done instead, and why it's a reasonable substitute:
+
+1. **Real end-to-end HTTP flow against live `uvicorn` + `vite dev`
+   processes** (not mocks, not `ASGITransport`): submitted a real claim
+   with two real PDF uploads (`test_documents/TC001_wrong_document/`)
+   to `POST /api/v1/claims` on a running backend — the real Gemini
+   classification call succeeded this time (confidence 0.98/0.95, not
+   fixture round numbers — the corporate SSL-proxy issue documented
+   since Phase 2C is evidently intermittent, not constant), correctly
+   `BLOCKED` with the specific, actionable "hospital bill required"
+   message. Confirmed the resulting `claim_id` appears at the top of
+   `GET /api/v1/claims` (newest-first), and that
+   `GET /api/v1/claims/{id}` / `GET /api/v1/claims/{id}/trace` both
+   return `200` with complete data — exactly what `ClaimHistory`,
+   `ClaimDetail`, and `TraceViewer` each render.
+2. **Cross-process persistence** — captured the claim + full trace (13
+   events), killed the `uvicorn` process, started a genuinely new one,
+   re-fetched both: **byte-identical** (`claim equal: True`,
+   `trace equal: True`).
+3. **`GET /api/v1/evaluation` verified live** — `total=12, passed=12,
+   all_passed=true`, with per-case expected/actual values matching
+   `docs/eval-report.md` exactly (this is the same data `Reports.tsx`
+   renders).
+4. **66 real component-render tests** (jsdom + React Testing Library —
+   these actually mount the real React components and assert on real
+   DOM output, not snapshot/shallow rendering) cover every page's
+   loading/empty/error/success states, including the exact "no stale
+   Phase 2A text" and "all 10 stages show Live" assertions Step 2/8
+   require, and `App.test.tsx`'s "every nav link is real and clickable"
+   assertion Step 6 requires.
+5. **A real, unplanned bug found and fixed live**: the first backend
+   instance was started on port 8123 without checking it was free — a
+   stale process from an earlier command was already bound there, so
+   the new `uvicorn` failed to bind and exited immediately, while curl
+   kept silently talking to the *old* process. Found via the server log
+   (`[WinError 10048] only one usage of each socket address...`), fixed
+   by finding and killing the actual PID via `netstat`/`Stop-Process`
+   before restarting — not a code bug, an artifact of this session's own
+   process management, but worth recording since it could otherwise
+   have produced a false "it works" result.
+
+What this does **not** replace: an actual human looking at the rendered
+page in a browser and confirming it looks good, spacing/typography read
+correctly, etc. Both the backend (`http://localhost:8000`) and frontend
+dev server (`http://localhost:5173`) were left running at the end of
+this session specifically so the user can do that visual pass
+immediately without waiting for a fresh startup.
+
+---
+
 ## Remaining Deliverables (not started — do not start without explicit instruction)
 
-Phase 3 (final audit and correctness) is complete — all 12 official
-cases pass, security/API/persistence are verified, and documentation is
-current. What's left is genuinely new work the user has explicitly said
-to stop before starting:
+Phase 4 (final frontend integration) is complete — the UI now
+accurately represents the Phase 3-complete backend, Claim History and
+Reports are live and backed by real data, and all 423 backend / 66
+frontend tests pass alongside a genuine 12/12 official evaluation.
+What's left is genuinely new work the user has explicitly said to stop
+before starting:
 
 - Record the assignment's demo video
+- A human visual pass in an actual browser — both servers were left
+  running (`http://localhost:8000` backend, `http://localhost:5173`
+  frontend) specifically so this can happen immediately; see
+  "Verification (Phase 4)"'s honesty note for exactly what automated
+  verification could and couldn't cover
 - Production deployment (hosting, environment config — Docker was
   evaluated and deliberately removed in Phase 3, see Decision 44; see
   `README.md` "Deployment" for the plain-process path instead)
@@ -1959,8 +2141,9 @@ to stop before starting:
   Gemini `ExplanationAgent` call and a live `uvicorn`-restart persistence
   check can both be re-verified end-to-end without the current
   direct-call/real-upload-failure workarounds (themselves already real,
-  not simulated — see "Verification (Phase 3)" — just not the *success*
-  path)
+  not simulated — see "Verification (Phase 3)"/"Verification (Phase 4)"
+  — Phase 4's own live submission did happen to succeed against the
+  real Gemini API, suggesting this issue is intermittent, not constant)
 - Consider Alembic (or similar) migrations before further domain-model
   column changes — see Known Issue 13 (hit again live in Phase 3's own
   verification — see "Resolved in Phase 3")
@@ -1970,6 +2153,9 @@ to stop before starting:
 - Consider parallelizing per-document AI calls and/or a bounded retry
   for transient failures — see Known Issues 15/16 and
   `docs/architecture.md` "Scaling to 10x Load"
+- Consider pagination for `GET /api/v1/claims` if claim volume grows
+  well beyond the current `limit`/500 ceiling — not needed at current
+  scale (see `docs/architecture.md` "Scaling to 10x Load")
 
 ---
 

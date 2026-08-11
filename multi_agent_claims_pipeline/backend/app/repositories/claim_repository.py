@@ -20,6 +20,7 @@ from app.domain.models import (
     ClaimHistoryItem,
     ClaimStatus,
     ClaimSubmission,
+    ClaimSummary,
     DecisionType,
     Document,
     DocumentMetadata,
@@ -165,6 +166,44 @@ class ClaimRepository(BaseRepository[Claim, str]):
                 )
             ).scalars().all()
             return _to_domain(row, doc_rows)
+
+    async def list_all(self, *, limit: int = 100) -> List[ClaimSummary]:
+        """
+        Lightweight claim listing for the Claim History UI (Phase 4) —
+        newest first. Same "query ClaimORM columns directly, don't
+        reconstruct a full Claim" approach as `list_by_member()` below;
+        the list view never needs documents/extraction/policy/financial/
+        fraud detail, only enough to identify a claim and show its
+        outcome before a reviewer opens its detail page. `decision`/
+        `approved_amount` are read directly off `row.decision_json` (not
+        a full `ClaimDecision` reconstruction) — both `None` for any
+        claim that hasn't reached a decision yet, never fabricated.
+        """
+        async with get_session() as session:
+            stmt = select(ClaimORM).order_by(ClaimORM.created_at.desc()).limit(limit)
+            rows = (await session.execute(stmt)).scalars().all()
+            return [
+                ClaimSummary(
+                    claim_id=row.claim_id,
+                    member_id=row.member_id,
+                    claim_category=ClaimCategory(row.claim_category),
+                    treatment_date=row.treatment_date,
+                    claimed_amount=row.claimed_amount,
+                    status=ClaimStatus(row.status),
+                    decision=(
+                        DecisionType(row.decision_json["decision"])
+                        if row.decision_json and row.decision_json.get("decision")
+                        else None
+                    ),
+                    approved_amount=(
+                        row.decision_json["approved_amount"]
+                        if row.decision_json and row.decision_json.get("approved_amount") is not None
+                        else None
+                    ),
+                    created_at=row.created_at,
+                )
+                for row in rows
+            ]
 
     async def list_by_member(
         self, member_id: str, *, exclude_claim_id: Optional[str] = None

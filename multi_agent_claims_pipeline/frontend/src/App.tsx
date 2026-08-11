@@ -6,6 +6,8 @@ import { BrowserRouter, Navigate, Route, Routes, NavLink } from 'react-router-do
 import { Dashboard } from './pages/Dashboard'
 import { ClaimSubmission } from './pages/ClaimSubmission'
 import { ClaimDetail } from './pages/ClaimDetail'
+import { ClaimHistory } from './pages/ClaimHistory'
+import { Reports } from './pages/Reports'
 
 // ── Global CSS Variables & Reset ──────────────────────────────────────────────
 const globalStyles = `
@@ -128,27 +130,34 @@ function Sidebar() {
             </div>
           )}
         </NavLink>
-        {/* Phase 3+ placeholders */}
-        <div style={{ ...linkStyle(false), opacity: 0.4, cursor: 'not-allowed' as const }}>
-          <span>📋</span> Claim History
-        </div>
-        <div style={{ ...linkStyle(false), opacity: 0.4, cursor: 'not-allowed' as const }}>
-          <span>📊</span> Evaluation Report
-        </div>
+        <NavLink to="/claims" end>
+          {({ isActive }) => (
+            <div style={linkStyle(isActive)}>
+              <span>📋</span> Claim History
+            </div>
+          )}
+        </NavLink>
+        <NavLink to="/reports">
+          {({ isActive }) => (
+            <div style={linkStyle(isActive)}>
+              <span>📊</span> Evaluation Report
+            </div>
+          )}
+        </NavLink>
       </nav>
 
-      {/* Phase indicator */}
+      {/* System status */}
       <div style={{
         marginTop: 'auto',
-        background: 'rgba(99,102,241,0.08)',
-        border: '1px solid rgba(99,102,241,0.2)',
+        background: 'rgba(34,197,94,0.08)',
+        border: '1px solid rgba(34,197,94,0.2)',
         borderRadius: '10px',
         padding: '12px',
         fontSize: '12px',
         color: '#64748b',
       }}>
-        <div style={{ color: '#a5b4fc', fontWeight: 600, marginBottom: '4px' }}>Phase 2A</div>
-        Claim Foundation & Document Verification
+        <div style={{ color: '#86efac', fontWeight: 600, marginBottom: '4px' }}>✅ Full Pipeline Active</div>
+        Claim Validation → Explanation, all 10 stages live
       </div>
     </aside>
   )
@@ -176,8 +185,10 @@ export default function App() {
           }}>
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/claims" element={<ClaimHistory />} />
               <Route path="/claims/new" element={<ClaimSubmission />} />
               <Route path="/claims/:claimId" element={<ClaimDetail />} />
+              <Route path="/reports" element={<Reports />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>

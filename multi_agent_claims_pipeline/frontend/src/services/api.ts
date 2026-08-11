@@ -12,9 +12,11 @@
 
 import type {
   APIError,
+  ClaimListResponse,
   ClaimResponse,
   ClaimSubmissionFields,
   ClaimTraceResponse,
+  EvaluationReportResponse,
   HealthResponse,
 } from '../types'
 
@@ -94,11 +96,13 @@ export const traceApi = {
     request<ClaimTraceResponse>(`/api/v1/claims/${encodeURIComponent(claimId)}/trace`),
 }
 
-// ── Claims Endpoints (Phase 2A) ─────────────────────────────────────────────
+// ── Claims Endpoints ─────────────────────────────────────────────────────────
 //
-// Phase 2A only covers claim validation, document verification, and
-// cross-document validation — a claim that clears all three comes back
-// with status "PROCESSING" and no decision yet.
+// A claim that clears every early-stop check reaches a final decision
+// (APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW) via the complete backend
+// pipeline (Claim Validation through Explanation). A claim that stops
+// early (wrong/missing/unreadable document, patient mismatch, unknown
+// member) comes back with status BLOCKED/DOCUMENTS_PENDING and no decision.
 
 export const claimsApi = {
   /**
@@ -126,6 +130,18 @@ export const claimsApi = {
   },
   get: (claimId: string): Promise<ClaimResponse> =>
     request<ClaimResponse>(`/api/v1/claims/${encodeURIComponent(claimId)}`),
+  /** Claim History — real persisted claims, newest first (Phase 4). */
+  list: (limit = 100): Promise<ClaimListResponse> =>
+    request<ClaimListResponse>(`/api/v1/claims?limit=${limit}`),
+}
+
+// ── Evaluation Endpoint (Phase 4) ────────────────────────────────────────────
+
+export const evaluationApi = {
+  /** The official 12-case test_cases.json evaluation, run fresh through
+   * the real pipeline on every call — never cached/hardcoded client-side. */
+  getReport: (): Promise<EvaluationReportResponse> =>
+    request<EvaluationReportResponse>('/api/v1/evaluation'),
 }
 
 export { APIClientError }

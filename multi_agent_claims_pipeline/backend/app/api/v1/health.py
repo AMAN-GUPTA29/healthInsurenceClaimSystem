@@ -34,7 +34,7 @@ class HealthResponse(BaseModel):
     timestamp: str
     ai_provider: AIProviderStatus
     database: str  # "connected" | "disconnected"
-    uptime_note: str = "Phase 0 — foundation only"
+    uptime_note: str = "Full pipeline operational — Claim Validation through Explanation"
 
 
 @router.get(

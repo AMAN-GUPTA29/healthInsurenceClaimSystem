@@ -1,11 +1,13 @@
 /**
- * ClaimSubmission page — real document upload (Phase 2A correction).
+ * ClaimSubmission page — real document upload.
  *
  * The member never selects a document type — only the AI's read of the
  * actual uploaded file determines that (see backend
  * app/agents/document_verification_agent.py). This page's only job is to
  * collect claim metadata and real PDF/JPEG/PNG files and submit them as
- * multipart/form-data.
+ * multipart/form-data. Submission runs the claim through the complete
+ * pipeline synchronously — the response already includes a final
+ * decision (or a specific early-stop reason) by the time it comes back.
  */
 
 import { useRef, useState } from 'react'
@@ -195,7 +197,9 @@ export function ClaimSubmission() {
         <p style={{ margin: 0, color: '#64748b', fontSize: '14px' }}>
           Upload real PDF, JPEG, or PNG documents. The AI determines each
           document's type, quality, and patient identity from its actual
-          content — Phase 2A does not generate a policy decision yet.
+          content, and the claim runs through the full pipeline —
+          policy evaluation, financial calculation, fraud analysis, and a
+          final decision — before you're taken to its detail page.
         </p>
       </div>
 

@@ -66,6 +66,12 @@ from app.services.document_input_adapter import ClaimDocumentInput, ClaimSubmiss
 from app.services.financial_calculation_service import FinancialCalculationService
 from app.tracing.service import TraceService
 
+# All 12 official case IDs, in order — the single shared definition for
+# both scripts/run_eval.py's CLI default and the read-only GET
+# /api/v1/evaluation endpoint (app/api/v1/evaluation.py, Phase 4), so
+# "which cases count as the official evaluation" is never duplicated.
+ALL_CASE_IDS = [f"TC{n:03d}" for n in range(1, 13)]
+
 # Fixture-based extraction confidence — see module docstring. Not AI-supplied
 # (there is no real AI call in this path), so a fixed, clearly-a-fixture
 # value is used rather than fabricating a "realistic-looking" score.

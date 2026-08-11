@@ -516,6 +516,8 @@ describe('ClaimDetail — decision (Phase 2D)', () => {
     await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
     expect(screen.getByTestId('decision-label')).toHaveTextContent('Partially Approved')
     expect(screen.getByTestId('decision-approved-amount')).toHaveTextContent('₹8,000.00')
+    // PARTIAL shows "of X claimed" context — from claim.claimed_amount, never invented.
+    expect(screen.getByText(/of ₹1,500\.00 claimed/)).toBeInTheDocument()
   })
 
   it('renders REJECTED with rejection-reason badges', async () => {

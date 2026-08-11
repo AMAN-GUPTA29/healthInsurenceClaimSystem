@@ -615,6 +615,56 @@ export interface ClaimTraceResponse {
   events: TraceEvent[]
 }
 
+// ── Claim History (Phase 4) ──────────────────────────────────────────────────
+//
+// Mirrors app/domain/models.py's ClaimSummary — a deliberately lightweight
+// row for the Claim History list. No documents/trace/policy detail here;
+// fetch claimsApi.get(claim_id) (ClaimResponse above) for full detail.
+
+export interface ClaimSummary {
+  claim_id: string
+  member_id: string
+  claim_category: ClaimCategory
+  treatment_date: string
+  claimed_amount: number
+  status: ClaimStatus
+  decision?: DecisionType
+  approved_amount?: number
+  created_at: string
+}
+
+export interface ClaimListResponse {
+  claims: ClaimSummary[]
+  count: number
+}
+
+// ── Official Evaluation Report (Phase 4) ─────────────────────────────────────
+//
+// Mirrors app/api/v1/evaluation.py. Every value here comes from a real run
+// of the official test_cases.json cases through the actual pipeline
+// (app/evaluation/runner.py) — the frontend never computes or hardcodes
+// any of it.
+
+export interface EvalCaseResult {
+  case_id: string
+  case_name: string
+  passed: boolean
+  reasons: string[]
+  expected_decision?: DecisionType
+  expected_approved_amount?: number
+  actual_status?: ClaimStatus
+  actual_decision?: DecisionType
+  actual_approved_amount?: number
+  actual_confidence?: number
+}
+
+export interface EvaluationReportResponse {
+  total: number
+  passed: number
+  all_passed: boolean
+  results: EvalCaseResult[]
+}
+
 // ── API Error ─────────────────────────────────────────────────────────────────
 
 export interface APIError {

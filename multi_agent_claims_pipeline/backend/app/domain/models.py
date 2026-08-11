@@ -244,6 +244,29 @@ class ClaimHistoryItem(BaseModel):
     decision: Optional[DecisionType] = None
 
 
+class ClaimSummary(BaseModel):
+    """
+    A lightweight row for the Claim History list (Phase 4) — deliberately
+    not a full `Claim`/`ClaimResponse`: the list view never needs
+    documents, extraction, policy/financial/fraud detail, or the trace,
+    only enough to identify a claim and show its outcome at a glance
+    before a member/reviewer opens its detail page. `ClaimRepository.
+    list_all()` populates this directly from `ClaimORM` columns, the same
+    "query columns, don't reconstruct a full domain object" approach
+    `list_by_member()` already established for `ClaimHistoryItem`.
+    """
+
+    claim_id: str
+    member_id: str
+    claim_category: ClaimCategory
+    treatment_date: date
+    claimed_amount: Decimal
+    status: ClaimStatus
+    decision: Optional[DecisionType] = None
+    approved_amount: Optional[Decimal] = None
+    created_at: datetime
+
+
 class ClaimSubmission(BaseModel):
     """
     The raw input payload submitted by a member/API consumer.

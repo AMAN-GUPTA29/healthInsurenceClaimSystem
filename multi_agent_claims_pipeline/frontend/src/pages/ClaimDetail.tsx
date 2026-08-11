@@ -597,6 +597,11 @@ function DecisionSection({ decision }: { decision: ClaimDecision }) {
             <div data-testid="decision-approved-amount" style={{ fontSize: '22px', fontWeight: 700, color: '#f1f5f9' }}>
               {fmtAmount(decision.approved_amount)}
             </div>
+            {decision.decision === 'PARTIAL' && (
+              <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '2px' }}>
+                of {fmtAmount(decision.claimed_amount)} claimed
+              </div>
+            )}
           </div>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', marginBottom: '4px' }}>Confidence</div>
@@ -760,7 +765,7 @@ export function ClaimDetail() {
             {claim.claim_id}
           </h1>
           <p style={{ margin: 0, color: '#64748b', fontSize: '13px' }}>
-            {claim.claim_category.replace(/_/g, ' ')} · Member {claim.member_id} · ₹{claim.claimed_amount}
+            {claim.claim_category.replace(/_/g, ' ')} · Member {claim.member_id} · {fmtAmount(claim.claimed_amount)} claimed
           </p>
         </div>
         <StatusBadge status={claim.status} />

@@ -22,6 +22,7 @@ from app.domain.models import (
     ClaimCategory,
     ClaimDecision,
     ClaimStatus,
+    ClaimSummary,
     DocumentProcessingStatus,
     DocumentQuality,
     DocumentType,
@@ -142,3 +143,13 @@ class ClaimResponse(BaseModel):
             created_at=claim.created_at,
             updated_at=claim.updated_at,
         )
+
+
+class ClaimListResponse(BaseModel):
+    """Response for `GET /api/v1/claims` (Phase 4) — the Claim History
+    list. `ClaimSummary` (app/domain/models.py) is reused wholesale, same
+    "reuse the domain model directly in the API response" precedent as
+    `ClaimResponse.decision` above."""
+
+    claims: List[ClaimSummary]
+    count: int

@@ -1,10 +1,13 @@
 /**
- * Dashboard page — Phase 0 placeholder.
+ * Dashboard page — system health + pipeline overview.
  *
- * Displays system health status from the backend.
- * The full claims submission UI will be implemented in Phase 1.
+ * Every pipeline stage listed here is implemented and live — see
+ * app/pipeline/pipeline.py for the real 9-stage orchestration this
+ * mirrors. Nothing on this page is a placeholder; system status comes
+ * entirely from GET /api/v1/health (useHealth), never invented.
  */
 
+import { Link } from 'react-router-dom'
 import { useHealth } from '../hooks/useHealth'
 import type { HealthResponse } from '../types'
 
@@ -95,9 +98,8 @@ export function Dashboard() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' as const }}>
-          <Badge variant="default">Phase 2A — Claim Foundation</Badge>
-          <Badge variant="success">Backend Active</Badge>
-          <Badge variant="warning">Policy Evaluation Pending</Badge>
+          <Badge variant="success">Full Pipeline Active</Badge>
+          <Badge variant="default">10 / 10 Stages Live</Badge>
         </div>
       </div>
 
@@ -197,26 +199,33 @@ export function Dashboard() {
         borderRadius: '16px',
         padding: '28px',
         backdropFilter: 'blur(8px)',
+        marginBottom: '28px',
       }}>
-        <h2 style={{ margin: '0 0 20px', fontSize: '16px', fontWeight: 600, color: '#e2e8f0' }}>
+        <h2 style={{ margin: '0 0 4px', fontSize: '16px', fontWeight: 600, color: '#e2e8f0' }}>
           Pipeline Architecture
         </h2>
+        <p style={{ margin: '0 0 20px', fontSize: '13px', color: '#64748b' }}>
+          Every claim flows through all 10 stages below, in order — early
+          document problems stop the pipeline before Policy Evaluation
+          ever runs; a claim that clears every check reaches a final
+          decision at stage 8.
+        </p>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
           {[
-            { step: 1, name: 'Claim Validation', status: 'live', icon: '✅' },
-            { step: 2, name: 'Document Verification', status: 'live', icon: '📋' },
-            { step: 3, name: 'Data Extraction', status: 'planned', icon: '🔍' },
-            { step: 4, name: 'Cross-Doc Validation', status: 'live', icon: '🔗' },
-            { step: 5, name: 'Policy Evaluation', status: 'planned', icon: '📜' },
-            { step: 6, name: 'Fraud Analysis', status: 'planned', icon: '🛡️' },
-            { step: 7, name: 'Financial Calculation', status: 'planned', icon: '💰' },
-            { step: 8, name: 'Decision Generation', status: 'planned', icon: '⚖️' },
-            { step: 9, name: 'Explanation', status: 'planned', icon: '💬' },
-            { step: 10, name: 'Trace & Observability', status: 'live', icon: '📊' },
-          ].map(({ step, name, icon, status }) => (
+            { step: 1, name: 'Claim Validation', icon: '📝' },
+            { step: 2, name: 'Document Verification', icon: '📋' },
+            { step: 3, name: 'Cross-Document Validation', icon: '🔗' },
+            { step: 4, name: 'Document Extraction', icon: '🔍' },
+            { step: 5, name: 'Policy Evaluation', icon: '📜' },
+            { step: 6, name: 'Financial Calculation', icon: '💰' },
+            { step: 7, name: 'Fraud Analysis', icon: '🛡️' },
+            { step: 8, name: 'Decision Generation', icon: '⚖️' },
+            { step: 9, name: 'Explanation', icon: '💬' },
+            { step: 10, name: 'Trace & Observability', icon: '📊' },
+          ].map(({ step, name, icon }) => (
             <div key={step} style={{
               background: 'rgba(15, 23, 42, 0.5)',
-              border: `1px solid ${status === 'live' ? 'rgba(34, 197, 94, 0.35)' : 'rgba(51, 65, 85, 0.6)'}`,
+              border: '1px solid rgba(34, 197, 94, 0.35)',
               borderRadius: '10px',
               padding: '12px 14px',
               display: 'flex',
@@ -224,8 +233,8 @@ export function Dashboard() {
               gap: '10px',
             }}>
               <div style={{
-                background: status === 'live' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(99, 102, 241, 0.15)',
-                border: `1px solid ${status === 'live' ? 'rgba(34, 197, 94, 0.3)' : 'rgba(99, 102, 241, 0.3)'}`,
+                background: 'rgba(34, 197, 94, 0.15)',
+                border: '1px solid rgba(34, 197, 94, 0.3)',
                 borderRadius: '6px',
                 width: '28px',
                 height: '28px',
@@ -234,7 +243,7 @@ export function Dashboard() {
                 justifyContent: 'center',
                 fontSize: '11px',
                 fontWeight: 700,
-                color: status === 'live' ? '#86efac' : '#a5b4fc',
+                color: '#86efac',
                 flexShrink: 0,
               }}>
                 {step}
@@ -243,13 +252,38 @@ export function Dashboard() {
                 <div style={{ fontSize: '13px', color: '#cbd5e1', fontWeight: 500 }}>
                   {icon} {name}
                 </div>
-                <div style={{ fontSize: '11px', color: status === 'live' ? '#4ade80' : '#475569', marginTop: '2px' }}>
-                  {status === 'live' ? 'Live — Phase 2A' : 'Planned'}
+                <div style={{ fontSize: '11px', color: '#4ade80', marginTop: '2px' }}>
+                  ✅ Live
                 </div>
               </div>
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Quick Links */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px' }}>
+        {[
+          { to: '/claims/new', icon: '📝', title: 'Submit a Claim', desc: 'Upload documents and run a claim through the full pipeline.' },
+          { to: '/claims', icon: '📋', title: 'Claim History', desc: 'Browse previously submitted claims and their decisions.' },
+          { to: '/reports', icon: '📊', title: 'Evaluation Report', desc: 'The official 12-case test_cases.json results, live.' },
+        ].map(({ to, icon, title, desc }) => (
+          <Link
+            key={to}
+            to={to}
+            style={{
+              background: 'rgba(30, 41, 59, 0.6)',
+              border: '1px solid rgba(99, 102, 241, 0.25)',
+              borderRadius: '14px',
+              padding: '20px',
+              display: 'block',
+            }}
+          >
+            <div style={{ fontSize: '22px', marginBottom: '8px' }}>{icon}</div>
+            <div style={{ fontSize: '14px', fontWeight: 600, color: '#e2e8f0', marginBottom: '4px' }}>{title}</div>
+            <div style={{ fontSize: '12px', color: '#64748b', lineHeight: 1.5 }}>{desc}</div>
+          </Link>
+        ))}
       </div>
     </div>
   )

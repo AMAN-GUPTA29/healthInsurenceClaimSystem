@@ -658,3 +658,107 @@ async def test_existing_health_endpoint_still_works(client_factory):
     client = await client_factory([])
     response = await client.get("/api/v1/health")
     assert response.status_code == 200
+
+
+# ── GET /api/v1/claims (list) — Phase 4 ─────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_list_claims_empty_database_returns_empty_list(client_factory):
+    client = await client_factory([])
+    response = await client.get("/api/v1/claims")
+    assert response.status_code == 200
+    result = response.json()
+    assert result["claims"] == []
+    assert result["count"] == 0
+
+
+@pytest.mark.anyio
+async def test_list_claims_returns_real_submitted_claims(client_factory):
+    data, files, ai_responses = tc001_form()
+    client = await client_factory(ai_responses)
+    submit_response = await client.post("/api/v1/claims", data=data, files=files)
+    claim_id = submit_response.json()["claim_id"]
+
+    list_response = await client.get("/api/v1/claims")
+    assert list_response.status_code == 200
+    result = list_response.json()
+    assert result["count"] == 1
+    row = result["claims"][0]
+    assert row["claim_id"] == claim_id
+    assert row["member_id"] == "EMP001"
+    assert row["claim_category"] == "CONSULTATION"
+    assert row["status"] == "BLOCKED"
+    assert row["decision"] is None
+    assert row["approved_amount"] is None
+
+
+@pytest.mark.anyio
+async def test_list_claims_newest_first(client_factory):
+    data, files, ai_responses = tc001_form()
+    client = await client_factory(ai_responses * 2)
+    first = await client.post("/api/v1/claims", data=data, files=files)
+    second = await client.post("/api/v1/claims", data=data, files=files)
+
+    result = (await client.get("/api/v1/claims")).json()
+    assert result["count"] == 2
+    ids = [row["claim_id"] for row in result["claims"]]
+    assert ids[0] == second.json()["claim_id"]
+    assert ids[1] == first.json()["claim_id"]
+
+
+@pytest.mark.anyio
+async def test_list_claims_respects_limit(client_factory):
+    data, files, ai_responses = tc001_form()
+    client = await client_factory(ai_responses * 3)
+    for _ in range(3):
+        await client.post("/api/v1/claims", data=data, files=files)
+
+    result = (await client.get("/api/v1/claims?limit=2")).json()
+    assert result["count"] == 2
+
+
+# ── GET /api/v1/evaluation — Phase 4 ────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_evaluation_report_runs_all_12_official_cases(client_factory):
+    """
+    Runs the real evaluation harness (app/evaluation/runner.py), not a
+    duplicate/simplified implementation — the same code path as
+    scripts/run_eval.py and tests/integration/test_eval_all_cases.py.
+    """
+    client = await client_factory([])
+    response = await client.get("/api/v1/evaluation")
+    assert response.status_code == 200
+    result = response.json()
+    assert result["total"] == 12
+    assert result["passed"] == 12
+    assert result["all_passed"] is True
+    assert len(result["results"]) == 12
+    case_ids = {r["case_id"] for r in result["results"]}
+    assert case_ids == {f"TC{n:03d}" for n in range(1, 13)}
+
+
+@pytest.mark.anyio
+async def test_evaluation_report_includes_expected_and_actual_values(client_factory):
+    client = await client_factory([])
+    result = (await client.get("/api/v1/evaluation")).json()
+    tc004 = next(r for r in result["results"] if r["case_id"] == "TC004")
+    assert tc004["expected_decision"] == "APPROVED"
+    assert tc004["actual_decision"] == "APPROVED"
+    assert tc004["expected_approved_amount"] == "1350"
+    assert tc004["actual_approved_amount"] == "1350.00"
+    assert tc004["passed"] is True
+
+    tc008 = next(r for r in result["results"] if r["case_id"] == "TC008")
+    assert tc008["expected_decision"] == "REJECTED"
+    assert tc008["actual_decision"] == "REJECTED"
+    assert tc008["passed"] is True
+
+    # TC001-TC003 stop before a decision — both expected and actual
+    # decision are legitimately None, never a fabricated value.
+    tc001 = next(r for r in result["results"] if r["case_id"] == "TC001")
+    assert tc001["expected_decision"] is None
+    assert tc001["actual_decision"] is None
+    assert tc001["actual_status"] == "BLOCKED"
