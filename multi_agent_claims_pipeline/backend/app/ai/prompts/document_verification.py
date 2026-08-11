@@ -41,6 +41,73 @@ system in India. Given information about an uploaded claim document, \
 determine its most likely type, how readable/usable it is, and the patient \
 name if one is visible in the provided information.
 
+Classify by the document's STRUCTURE AND PURPOSE, never by the medical \
+specialty or department that issued it. A document is a BILL if it exists \
+to charge for and record payment of services rendered — it does not \
+matter whether those services are general-hospital, dental, diagnostic, \
+or any other specialty; the specialty never changes the document's type \
+from a bill to a report. A document is a REPORT only if its primary \
+content is clinical narrative (findings, results, an interpretation) \
+with no itemized charges or payment record.
+
+Billing documents (BILL indicators — an itemized table of \
+charges/procedures with amounts, plus billing/payment metadata): \
+"BILL" or "BILL / RECEIPT" as a heading, "Bill No" / "Invoice No", a \
+line-item table with columns like "Description"/"Procedure"/"Amount"/ \
+"Rate"/"Qty", a "Total Amount" / "Subtotal", and payment details such as \
+"Payment Mode" or "Received by". Any document matching this pattern is a \
+billing document — HOSPITAL_BILL for a general/dental/diagnostic-center \
+bill (a dental clinic's itemized bill for a root canal is a \
+HOSPITAL_BILL, not a DENTAL_REPORT; a diagnostics center's itemized bill \
+for a scan is a HOSPITAL_BILL, not a DIAGNOSTIC_REPORT or LAB_REPORT), \
+or PHARMACY_BILL specifically when it itemizes dispensed medicines \
+(batch/expiry/MRP per drug) rather than procedures or services.
+
+Report documents (REPORT indicators — clinical narrative, no itemized \
+charges): "Findings", "Observations", "Impression", "Conclusion", \
+"Results", test-result tables with reference ranges, or a clinician's \
+written assessment. DIAGNOSTIC_REPORT, LAB_REPORT, and DENTAL_REPORT all \
+mean this kind of narrative clinical write-up — never an itemized bill \
+for one, even when billing-sounding words appear in the clinical text \
+too.
+
+Within report documents, classify by WHO issued the report and HOW it is \
+tracked/reported, never by which medical test or procedure it describes. \
+The specific test — blood work, X-ray, MRI, CT, ultrasound, ECG, biopsy, \
+or any other — never by itself determines LAB_REPORT vs DIAGNOSTIC_REPORT; \
+a laboratory can report an MRI finding just as it reports a blood count, \
+and that document is still a LAB_REPORT.
+
+LAB_REPORT (laboratory-issued reporting structure — look for these \
+together, regardless of what test was performed): the reporting entity is \
+an accredited laboratory/diagnostics center (e.g. "NABL Accredited", a lab \
+name, a "Lab ID" or lab registration number); a "Sample ID" and \
+"Sample Date" tracking the specimen/scan through the lab's process, \
+separate from the "Report Date"; a structured TEST NAME / RESULT / UNIT / \
+NORMAL RANGE (or reference range) layout; and a reporting \
+pathologist/lab doctor with their own registration number, distinct from \
+any referring/treating doctor. A document with this lab-issued tracking \
+and reporting structure is LAB_REPORT even if the test it reports is an \
+imaging study (MRI, CT, X-ray) rather than a blood or pathology test.
+
+DIAGNOSTIC_REPORT (clinical report without laboratory-issued reporting \
+structure): a diagnostic study write-up — e.g. a radiologist's or \
+specialist's narrative findings/impression — that lacks the lab-specific \
+tracking above (no accredited-lab identity, no Sample ID separate from \
+the report, no standardized test/result/range table). If the same \
+clinical narrative and vocabulary (including "MRI", "scan", "impression", \
+"result") appears without that lab-reporting structure, it stays \
+DIAGNOSTIC_REPORT — the words alone never upgrade it to LAB_REPORT.
+
+Prescription documents (PRESCRIPTION indicators): "Prescription" or \
+"Rx", a doctor's registration details, and medication/dosage/frequency/ \
+duration instructions — not a bill or a report.
+
+When a document shows both billing structure (itemized amounts, total, \
+payment) and some clinical vocabulary (e.g. a dental or diagnostic \
+procedure name as a line-item description), the billing structure \
+governs — classify it as the bill type, not the report type.
+
 Be conservative: if the available information does not clearly indicate a \
 document type, prefer UNKNOWN over guessing. If you cannot determine \
 whether the document is readable, prefer a lower confidence score rather \

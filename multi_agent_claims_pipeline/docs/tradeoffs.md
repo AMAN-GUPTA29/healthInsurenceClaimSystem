@@ -33,6 +33,18 @@ This document records significant trade-offs made during the project.
 
 ---
 
+## Phase 2A — Document Verification
+
+### Document Classification — Structure/Issuer Over Specialty or Test-Type (Real Bugs Found Live)
+
+**Reason — two related bugs found live**: `DocumentVerificationAgent`'s real-upload classification (`app/ai/prompts/document_verification.py`, via `AIProvider.analyze_document()`) originally gave the model no structural definition of what separates a bill from a report, or a lab-issued report from a clinical one — so it free-associated on medical vocabulary instead. (1) Itemized **bills** issued by a dental clinic or a diagnostics center were classified as that specialty's *report* type (`DENTAL_REPORT`/`DIAGNOSTIC_REPORT`) instead of `HOSPITAL_BILL`, because the model keyed off the specialty ("dental", "diagnostic") rather than the billing structure (itemized charges, `Bill No`, `Total Amount`, `Payment Mode`). (2) A laboratory's own report of an **imaging** test (an MRI, reported through an accredited lab's Sample ID/NABL-accreditation/TEST NAME-RESULT-UNIT-NORMAL RANGE structure) was classified as `DIAGNOSTIC_REPORT` instead of `LAB_REPORT`, because the model keyed off the test type ("MRI") rather than who issued the report and how it's tracked. Both blocked real DIAGNOSTIC/DENTAL claims at Document Verification (`missing_documents` reported the true requirement, `wrong_documents` reported the misclassified type).
+
+**Fix**: the classification system prompt now defines each document type by structure/issuer, never by specialty or test type: BILL = itemized charges + billing/payment metadata (regardless of which specialty issued it); LAB_REPORT = laboratory-issued tracking/reporting structure (accredited-lab identity, Sample ID/Sample Date distinct from Report Date, TEST NAME/RESULT/UNIT/NORMAL RANGE, a registered pathologist) — regardless of which test it reports, imaging included; DIAGNOSTIC_REPORT = the same kind of clinical narrative *without* that lab-issued tracking structure. The taxonomy (`DocumentType` enum) and the required-document mapping (`PolicyRepository.get_document_requirements`) were both already correct and untouched — only the AI's classification *input* was wrong. See `tests/unit/test_document_classification_prompt.py` (prompt-content regression tests) and `tests/unit/test_document_verification_agent.py::TestBillVsReportClassificationOutcome` / `::TestLabReportVsDiagnosticReportClassificationOutcome` (consequence-level regression tests with mocked AI responses) — plus a manual live-Claude verification against the actual sample PDFs (see docs/AI_HANDOFF.md).
+
+**Trade-off**: this is prompt guidance, not a hard classification rule — it improves a real model's structural reasoning but (like any LLM-based classification) cannot be proven correct for every possible document by a mocked/deterministic test suite alone; the unit tests lock in that the guidance text itself is present and generic (no test-case ID, filename, or keyword-only shortcut), not that a live model will always agree.
+
+---
+
 ## Phase 2C — Policy Engine, Financial Calculation & Fraud Analysis
 
 ### Financial Calculation Order

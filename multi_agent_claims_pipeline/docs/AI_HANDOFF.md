@@ -110,8 +110,8 @@ Correctness & Submission Readiness ✅ COMPLETE — history preserved below)
 - No CSS framework (Vanilla CSS / inline styles)
 
 ### AI Stack
-- **Google Gemini (current default provider, `AI_PROVIDER=gemini`)** — switched from Anthropic on 2026-08-09 at the user's request. Uses the `google-genai` SDK.
-- Anthropic Claude remains fully implemented as an alternate provider (`AI_PROVIDER=anthropic`) — both adapters are maintained side by side to prove out the abstraction.
+- **Anthropic Claude Sonnet (current default provider, `AI_PROVIDER=anthropic`, `AI_MODEL=claude-sonnet-4-5`)** — switched back from Gemini on 2026-08-11 at the user's explicit request (Sonnet chosen over Opus for cost efficiency). Uses the official `anthropic` SDK. See "AI Provider — Migration to Anthropic Claude Sonnet" below for the full account, including real (not just mocked) verification.
+- Google Gemini remains fully implemented as an alternate provider (`AI_PROVIDER=gemini`, was the default from 2026-08-09 through this switch) — both adapters are maintained side by side to prove out the abstraction; switching between them is a `.env` change only.
 - `AIProvider` ABC ensures vendor agnosticism
 - ONLY `app/ai/providers/anthropic_provider.py` imports the Anthropic SDK; ONLY `app/ai/providers/gemini_provider.py` imports `google-genai`
 
@@ -798,7 +798,11 @@ python ../scripts/run_eval.py            # all 12
 python ../scripts/run_eval.py TC008      # a single case
 ```
 
-**All tests pass** (423 backend, 66 frontend component tests) — up from
+**All tests pass** (423 backend, 67 frontend component tests — the +1
+frontend since Phase 4 is `Reports.test.tsx`'s methodology-note test
+added in a later small UI-cleanup task, verifying the "Official
+Deterministic Evaluation" explainer never implies live AI/document
+testing) — up from
 the Phase 3 baseline of 417 backend / 46 frontend; the +6 backend
 increase is Phase 4's new endpoint tests (`test_list_claims_*` ×4,
 `test_evaluation_report_*` ×2 in `tests/integration/test_claims_api.py`),
@@ -1347,6 +1351,127 @@ by a real verification run above, not just automated tests with fakes.
 
 ---
 
+## AI Provider — Migration to Anthropic Claude Sonnet (2026-08-11)
+
+A small, config-only cleanup task (not a new phase) — no claims-processing
+logic, agent, or pipeline code was touched. `AIProvider`/the factory/both
+adapters already existed and already implemented everything needed; this
+was purely "flip the configuration and prove it actually works."
+
+**What changed**:
+- `backend/.env`: `AI_PROVIDER=gemini` → `AI_PROVIDER=anthropic`,
+  `AI_MODEL=gemini-flash-latest` → `AI_MODEL=claude-sonnet-4-5`,
+  `ANTHROPIC_API_KEY` set to a real key (the `GEMINI_API_KEY` line is
+  left in place, unused while `AI_PROVIDER=anthropic` but ready for an
+  instant switch back).
+- `.env.example`: reordered so Anthropic is documented as the default,
+  Gemini as the alternate — same content, correct emphasis.
+- `README.md`/`docs/architecture.md`: updated to describe Anthropic as
+  current default, Gemini as alternate, and to correct a now-inaccurate
+  claim that live AI verification was impossible in this environment
+  (see below — it turns out to be Gemini-specific).
+- One test fix: `tests/unit/test_config.py::test_default_ai_provider_is_gemini`
+  was asserting `Settings()`'s *effective* provider (which now legitimately
+  resolves to `anthropic` via `.env`) rather than the `Settings` class's
+  own declared field default (`AIProvider.GEMINI` in `settings.py` —
+  itself unchanged). Fixed by isolating the test from `.env`/the real
+  environment (`Settings(_env_file=None)` + `monkeypatch.delenv`), not by
+  weakening or deleting it — it still locks in the same code-level fact
+  it always did.
+- `app/ai/providers/anthropic_provider.py`, `app/ai/providers/factory.py`,
+  `app/api/v1/health.py` — **zero changes**. All three already worked
+  exactly as required (full `AIProvider` interface implementation,
+  config-driven provider selection, provider-agnostic health reporting).
+
+**A genuinely new finding, not assumed going in**: the corporate
+SSL-inspection proxy documented since Phase 2C (`CERTIFICATE_VERIFY_FAILED`)
+turns out to be **Gemini/Google-specific, not a blanket block on all
+outbound AI traffic** — real Anthropic API calls succeeded on the first
+attempt, no retry, no workaround. This rewrites part of the "no live AI
+verification possible here" narrative that had been true (or assumed
+true) for every prior phase — see `README.md` "Known Limitations" and
+Known Issue 22 below, both updated accordingly. TLS verification was
+never disabled or weakened to achieve this — the calls simply succeeded
+against Anthropic's endpoint without needing to.
+
+### Real verification performed — clearly distinguished from mocked tests
+
+**Mocked/unit provider tests** (pre-existing, unchanged, still passing):
+`tests/unit/test_ai_provider.py`'s `TestAIProviderInterface`,
+`TestGeminiProvider`, and `TestAIProviderVendorIsolation` (17 tests) —
+these construct providers with fake/placeholder credentials and never
+make a network call. `tests/unit/test_explanation_agent.py`'s 10 tests
+(including `TestProviderTimeout`/`TestProviderFailure`) prove the
+deterministic fallback works using a fake provider that raises on
+demand — this is what "the fallback still works if Claude fails" is
+backed by; deliberately breaking the real, working Anthropic connection
+just to re-observe the same already-tested code path would have been
+pointless, so that wasn't done.
+
+**Real Anthropic API verification** (ad-hoc script, not committed —
+same pattern as prior phases' real-AI verification scripts):
+1. `create_ai_provider(get_settings())` → `AnthropicProvider` instance,
+   `provider_name="anthropic"`, `model_name="claude-sonnet-4-5"`.
+   `initialize()` succeeded (real auth).
+2. A minimal `generate_structured()` call (tiny schema: greeting string +
+   integer) via the `AIProvider` abstraction — Claude responded, output
+   validated against the schema exactly (`{"greeting": "Hello!",
+   "number": 42}`), `response.provider="anthropic"`,
+   `response.model="claude-sonnet-4-5-20250929"` (the dated snapshot
+   behind the `claude-sonnet-4-5` alias), `latency_ms≈5355`,
+   `usage.input_tokens=688`/`output_tokens=50`. No API key printed at
+   any point.
+
+**Real end-to-end claim verification** (actual `POST /api/v1/claims`,
+real PDFs — `test_documents/TC004_clean_consultation/`, TC004-shaped:
+EMP001/CONSULTATION/₹1500, two real PDF files, no fixture classifications):
+- `HTTP 201`, `status=DECIDED`, `decision=APPROVED`,
+  `approved_amount=1350.00`, `confidence_score=0.95` — the correct TC004
+  figures, computed the same deterministic way regardless of provider.
+- `explanation_detail.source="AI"` (not `FALLBACK`) — Claude successfully
+  wrote the member-facing explanation; visibly richer, natural-language
+  prose ("We received your claim for ₹1,500 and have approved ₹1,350 for
+  payment. The difference is due to a 10% co-payment...") than the
+  deterministic fallback template.
+- Full 20-event trace, zero `FAILED` events, `PIPELINE` reached
+  `COMPLETED`. **Exactly three** stages carried `ai_metadata` —
+  `DOCUMENT_VERIFICATION` (classification, confidence 0.98/0.95 on the
+  two real PDFs), `DOCUMENT_EXTRACTION`, and `EXPLANATION` — every one
+  showing `provider="anthropic"`, `model="claude-sonnet-4-5-20250929"`,
+  and a real `latency_ms`. `CLAIM_VALIDATION`, `CROSS_DOCUMENT_VALIDATION`,
+  `POLICY_ENGINE`, `FINANCIAL_CALCULATION`, `FRAUD_ANALYSIS`, and
+  `DECISION_GENERATION` correctly carried **no** `ai_metadata` — these
+  stages have never made an AI call in this codebase, provider migration
+  or not, and this run confirms that boundary held.
+
+**Provider-switch regression check** (config-only, no code change):
+`create_ai_provider(Settings())` with the real `.env`
+(`AI_PROVIDER=anthropic`) → `AnthropicProvider`; `create_ai_provider
+(Settings(ai_provider=AIProvider.GEMINI, ai_model="gemini-flash-latest"))`
+→ `GeminiProvider` — both from the identical factory function, selection
+driven entirely by the `ai_provider` field. No second real Gemini API
+call was made (unnecessary quota use, and Gemini's live connectivity was
+already re-confirmed as the known, documented, unrelated SSL-proxy issue
+in prior phases) — only construction/selection was checked, which is
+exactly what "provider selection is configuration-driven" claims.
+
+### Security
+
+`.env` confirmed gitignored and untracked (`git ls-files` — no match).
+Repo-wide search for both the Gemini and Anthropic key values (by unique
+prefix, never the full value) outside `.env` — no matches. `sk-ant-`
+appears once in this file's own prose (an illustrative placeholder,
+`ANTHROPIC_API_KEY=sk-ant-...`, not a real key). No `verify=False`/
+`CERT_NONE`/SSL-bypass code anywhere in `app/`. `AITraceMetadata` (the
+only AI-related shape ever written to a trace) has no field capable of
+holding a key in the first place; `redact_metadata()`'s
+`_SENSITIVE_KEY_MARKERS` additionally catches `api_key`/`secret`/`token`/
+`password`/`authorization` defensively. `/health` returns only
+`provider`/`model`/`status` ("configured"/"unconfigured"), never the key
+itself.
+
+---
+
 ## Known Issues
 
 1. **Gemini `response_schema` is not full JSON Schema** — see Decision 8. Extraction
@@ -1518,6 +1643,16 @@ by a real verification run above, not just automated tests with fakes.
     **Still present in the Phase 2D session** — re-confirmed live against
     `ExplanationAgent` (see "Verification (Phase 2D)" above), same root
     cause, same environment. Not something Phase 2D's code can fix.
+    **Narrowed during the Anthropic provider migration (2026-08-11)**:
+    this issue is specific to Google/Gemini's endpoint — a real Anthropic
+    API call from this same machine, same network, succeeded immediately
+    with no retry or workaround (see "AI Provider — Migration to
+    Anthropic Claude Sonnet" above). Whatever the corporate proxy's rule
+    is keyed on (domain, cert chain served by that specific host, etc.),
+    it does not appear to block `api.anthropic.com`. Gemini itself was
+    not re-tested this session (no reason to expect the Google-specific
+    issue to have changed) — this is a live finding about Anthropic, not
+    a claim that Gemini is now fixed.
 
 23. ~~**`DecisionGenerationAgent`'s decision (not just amount) disagrees with
     `test_cases.json`'s own expectation for TC008**~~ — **RESOLVED in
@@ -2116,6 +2251,33 @@ correctly, etc. Both the backend (`http://localhost:8000`) and frontend
 dev server (`http://localhost:5173`) were left running at the end of
 this session specifically so the user can do that visual pass
 immediately without waiting for a fresh startup.
+
+---
+
+## Real AI Verification — Document Classification Fix (2026-08-11)
+
+Two real, live document-classification failures found in production use (real uploads, real AI classification — not the fixture/evaluation path):
+
+1. Itemized **bills** issued by a dental clinic or diagnostics center were classified as that specialty's *report* type (`DENTAL_REPORT`/`DIAGNOSTIC_REPORT`) instead of `HOSPITAL_BILL`, blocking DENTAL/DIAGNOSTIC claims at Document Verification.
+2. A laboratory's own report of an **imaging** test (MRI, reported through the lab's Sample ID/NABL-accreditation/TEST NAME-RESULT-UNIT-NORMAL RANGE structure) was classified as `DIAGNOSTIC_REPORT` instead of `LAB_REPORT`, blocking DIAGNOSTIC claims (which require `LAB_REPORT`, not `DIAGNOSTIC_REPORT`).
+
+Both are fixed in `app/ai/prompts/document_verification.py`'s `DOCUMENT_CLASSIFICATION_SYSTEM_PROMPT` — see `docs/tradeoffs.md` "Document Classification — Structure/Issuer Over Specialty or Test-Type" for the full reasoning. Deterministic regression coverage (mocked AI responses) is in `tests/unit/test_document_classification_prompt.py` and `tests/unit/test_document_verification_agent.py`.
+
+**Real, live verification** (not simulated) — the actual sample PDFs for the official "MRI Without Pre-Authorization" scenario (`sample_documents/TC007_mri_no_preauth/`) were sent through the real, configured Anthropic provider (`claude-sonnet-4-5-20250929`) via the app's own `create_ai_provider()` factory and `build_document_analysis_request()` — no vendor-SDK isolation was bypassed, no filename/test-case hint was given to the model:
+
+- `F012_prescription_suresh.pdf` → `PRESCRIPTION` (confidence 0.98)
+- `F013_mri_lab_report.pdf` → `LAB_REPORT` (confidence 0.95) — model's own reasoning: *"NABL accredited laboratory with Sample ID, structured test/result/range table, and reporting pathologist with registration number — classic lab-issued reporting structure for an MRI study."*
+- `F014_mri_hospital_bill.pdf` → `HOSPITAL_BILL` (confidence 1.0) — regression-checked, unaffected by this fix.
+
+Then the actual claim was submitted through the real running API (`POST /api/v1/claims`, real dev server on the current code, real multipart PDF upload — not a fixture) with `member_id=EMP007`, `policy_id=PLUM_GHI_2024`, `claim_category=DIAGNOSTIC`, `treatment_date=2024-11-02`, `claimed_amount=15000`, and the three real PDFs above:
+
+- `document_verification_result.status = PASS`, `missing_documents = []`, `wrong_documents = []`
+- Classifications: `PRESCRIPTION`, `LAB_REPORT`, `HOSPITAL_BILL` — exactly the DIAGNOSTIC category's required set
+- `decision.decision = REJECTED`, `decision.rejection_reasons` includes `PRE_AUTH_MISSING` — matching test_cases.json's own expected TC007 outcome (`REJECTED`, `PRE_AUTH_MISSING`)
+
+(The live run's `rejection_reasons` also included `SUBMISSION_DEADLINE`/`PER_CLAIM_LIMIT`/`SUB_LIMIT` — an artifact of submitting a 2024-11-02-dated claim against the real current calendar date long after 2024, not a classification or policy bug; the fixture-based evaluation harness, which controls for this, shows the clean official result — see the 12/12 `scripts/run_eval.py` run below.)
+
+No API key was printed/logged/exposed at any point (the verification script reads `ANTHROPIC_API_KEY` from `.env` via the existing `Settings`/factory, the same way the running app already does); TLS verification was never disabled.
 
 ---
 
