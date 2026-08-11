@@ -483,8 +483,13 @@ describe('ClaimDetail — decision (Phase 2D)', () => {
 
     await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
     expect(screen.getByTestId('decision-label')).toHaveTextContent('Approved')
+    expect(screen.getByTestId('decision-claimed-amount')).toHaveTextContent('₹1,500.00')
     expect(screen.getByTestId('decision-approved-amount')).toHaveTextContent('₹1,350.00')
     expect(screen.getByTestId('decision-confidence')).toHaveTextContent('95%')
+    // Claimed vs. approved must both be visible, plus a concise relationship.
+    expect(screen.getByTestId('decision-amount-summary')).toHaveTextContent(
+      '₹1,350.00 approved out of ₹1,500.00 claimed.'
+    )
     expect(screen.getByTestId('decision-member-message')).toHaveTextContent('Your claim has been approved.')
     expect(screen.getByText('Fully covered under policy terms')).toBeInTheDocument()
     // Explanation was AI-generated — no "fallback" badge should render.
@@ -515,16 +520,21 @@ describe('ClaimDetail — decision (Phase 2D)', () => {
 
     await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
     expect(screen.getByTestId('decision-label')).toHaveTextContent('Partially Approved')
+    expect(screen.getByTestId('decision-claimed-amount')).toHaveTextContent('₹1,500.00')
     expect(screen.getByTestId('decision-approved-amount')).toHaveTextContent('₹8,000.00')
-    // PARTIAL shows "of X claimed" context — from claim.claimed_amount, never invented.
-    expect(screen.getByText(/of ₹1,500\.00 claimed/)).toBeInTheDocument()
+    // Claimed vs. approved must both be visible, plus a concise relationship —
+    // from decision.claimed_amount/approved_amount, never invented.
+    expect(screen.getByTestId('decision-amount-summary')).toHaveTextContent(
+      '₹8,000.00 approved out of ₹1,500.00 claimed.'
+    )
   })
 
-  it('renders REJECTED with rejection-reason badges', async () => {
+  it('renders REJECTED with rejection-reason badges, and the claimed amount alongside the ₹0 approved amount', async () => {
     vi.mocked(claimsApi.get).mockResolvedValue({
       ...baseClaim,
       status: 'DECIDED',
       decision: makeDecision({
+        claimed_amount: 7500,
         decision: 'REJECTED',
         approved_amount: 0,
         reason_code: 'REJECTED_WAITING_PERIOD',
@@ -537,7 +547,13 @@ describe('ClaimDetail — decision (Phase 2D)', () => {
 
     await waitFor(() => expect(screen.getByTestId('decision-label')).toBeInTheDocument())
     expect(screen.getByTestId('decision-label')).toHaveTextContent('Rejected')
+    // The known-confusing case: ₹0 approved must never appear without the
+    // claimed amount right alongside it.
+    expect(screen.getByTestId('decision-claimed-amount')).toHaveTextContent('₹7,500.00')
     expect(screen.getByTestId('decision-approved-amount')).toHaveTextContent('₹0.00')
+    expect(screen.getByTestId('decision-amount-summary')).toHaveTextContent(
+      '₹0.00 approved out of ₹7,500.00 claimed.'
+    )
     expect(screen.getByText('WAITING PERIOD')).toBeInTheDocument()
   })
 

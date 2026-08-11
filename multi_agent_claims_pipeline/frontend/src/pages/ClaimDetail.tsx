@@ -591,17 +591,18 @@ function DecisionSection({ decision }: { decision: ClaimDecision }) {
             <span data-testid="decision-label">{style.label}</span>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: '28px' }}>
+        <div style={{ display: 'flex', gap: '28px', flexWrap: 'wrap' }}>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', marginBottom: '4px' }}>Claimed Amount</div>
+            <div data-testid="decision-claimed-amount" style={{ fontSize: '22px', fontWeight: 700, color: '#e2e8f0' }}>
+              {fmtAmount(decision.claimed_amount)}
+            </div>
+          </div>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', marginBottom: '4px' }}>Approved Amount</div>
             <div data-testid="decision-approved-amount" style={{ fontSize: '22px', fontWeight: 700, color: '#f1f5f9' }}>
               {fmtAmount(decision.approved_amount)}
             </div>
-            {decision.decision === 'PARTIAL' && (
-              <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '2px' }}>
-                of {fmtAmount(decision.claimed_amount)} claimed
-              </div>
-            )}
           </div>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', marginBottom: '4px' }}>Confidence</div>
@@ -611,6 +612,15 @@ function DecisionSection({ decision }: { decision: ClaimDecision }) {
           </div>
         </div>
       </div>
+
+      {decision.approved_amount != null && (
+        <p
+          data-testid="decision-amount-summary"
+          style={{ margin: '0 0 16px', fontSize: '14px', fontWeight: 600, color: style.fg }}
+        >
+          {fmtAmount(decision.approved_amount)} approved out of {fmtAmount(decision.claimed_amount)} claimed.
+        </p>
+      )}
 
       <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
         {decision.rejection_reasons.map(r => (
@@ -758,7 +768,7 @@ export function ClaimDetail() {
   const hasProblem = claim.status === 'BLOCKED' || claim.status === 'DOCUMENTS_PENDING'
 
   return (
-    <div style={{ padding: '40px 0', maxWidth: '900px' }}>
+    <div style={{ padding: '40px 0' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' }}>
         <div>
           <h1 style={{ margin: '0 0 6px', fontSize: '22px', fontWeight: 700, color: '#f1f5f9' }}>
