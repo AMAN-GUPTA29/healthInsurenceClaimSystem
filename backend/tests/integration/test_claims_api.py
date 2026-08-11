@@ -762,3 +762,153 @@ async def test_evaluation_report_includes_expected_and_actual_values(client_fact
     assert tc001["expected_decision"] is None
     assert tc001["actual_decision"] is None
     assert tc001["actual_status"] == "BLOCKED"
+
+
+# ── Persistence with FK enforcement on — regression for the production ─────
+# PostgreSQL ForeignKeyViolationError on claim_documents (claim_id) ────────
+#
+# `client_factory` above runs against real SQLite, but SQLite silently does
+# NOT enforce foreign keys unless a connection explicitly turns on
+# `PRAGMA foreign_keys`, which this app's database.py never does — so a
+# save() that inserts claim_documents rows before their parent claims row
+# exists in the same flush would pass every test using `client_factory`
+# and still fail on PostgreSQL, which always enforces the FK. That's
+# exactly what happened in production for CLM-41E8E91F.
+#
+# `client_factory_fk_enforced` is identical to `client_factory` except it
+# turns SQLite's FK enforcement on, so it actually fails the way PostgreSQL
+# would if ClaimRepository.save() ever regresses to inserting
+# claim_documents rows before their parent claims row within the same
+# transaction.
+
+
+@pytest.fixture
+async def client_factory_fk_enforced(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "testing")
+    monkeypatch.setenv("AI_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{TEST_DB_PATH}")
+    monkeypatch.setenv("UPLOAD_DIR", TEST_UPLOAD_DIR)
+
+    os.makedirs("data", exist_ok=True)
+    if os.path.exists(TEST_DB_PATH):
+        os.remove(TEST_DB_PATH)
+    shutil.rmtree(TEST_UPLOAD_DIR, ignore_errors=True)
+
+    from app.config.settings import get_settings
+    from app.api.deps import (
+        _get_ai_provider_singleton,
+        _get_policy_repository_singleton,
+        _get_document_storage_singleton,
+        get_ai_provider,
+    )
+
+    get_settings.cache_clear()
+    _get_ai_provider_singleton.cache_clear()
+    _get_policy_repository_singleton.cache_clear()
+    _get_document_storage_singleton.cache_clear()
+
+    import app.repositories.database as dbmod
+    from app.repositories.database import close_database, init_database
+    from sqlalchemy import event
+
+    await init_database(f"sqlite+aiosqlite:///{TEST_DB_PATH}")
+
+    # Make this connection enforce FKs the way PostgreSQL always does —
+    # the one deliberate difference from `client_factory`.
+    @event.listens_for(dbmod._engine.sync_engine, "connect")
+    def _enable_fk(dbapi_conn, _):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    from app.main import create_app
+
+    app = create_app()
+    clients: list[AsyncClient] = []
+
+    async def make_client(ai_responses: list[dict] | None = None) -> AsyncClient:
+        if ai_responses is not None:
+            fake_provider = _FakeSequentialAIProvider(ai_responses)
+            app.dependency_overrides[get_ai_provider] = lambda: fake_provider
+        ac = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+        clients.append(ac)
+        return ac
+
+    yield make_client
+
+    for ac in clients:
+        await ac.aclose()
+    app.dependency_overrides.clear()
+    await close_database()
+    get_settings.cache_clear()
+    _get_ai_provider_singleton.cache_clear()
+    _get_policy_repository_singleton.cache_clear()
+    _get_document_storage_singleton.cache_clear()
+    if os.path.exists(TEST_DB_PATH):
+        os.remove(TEST_DB_PATH)
+    shutil.rmtree(TEST_UPLOAD_DIR, ignore_errors=True)
+
+
+@pytest.mark.anyio
+async def test_submit_claim_blocked_persists_with_fk_enforcement_on(client_factory_fk_enforced):
+    """
+    Reproduces the production incident: a claim that BLOCKS at Document
+    Verification (missing hospital bill — same shape as CLM-41E8E91F) must
+    still save its claim row and its claim_documents rows in one
+    transaction, in an order PostgreSQL's real FK constraint accepts. Before
+    the fix, this raised IntegrityError/500 whenever FKs are enforced.
+    """
+    data, files, ai_responses = tc001_form()
+    client = await client_factory_fk_enforced(ai_responses)
+    response = await client.post("/api/v1/claims", data=data, files=files)
+
+    assert response.status_code == 201
+    result = response.json()
+    assert result["status"] == "BLOCKED"
+    assert result["stopped_at"] == "DOCUMENT_VERIFICATION"
+    assert len(result["documents"]) == 2
+
+    # Round-trip through GET confirms both the claim row and its
+    # claim_documents rows actually landed (not just that the in-memory
+    # response looked right before persistence ran).
+    fetched = await client.get(f"/api/v1/claims/{result['claim_id']}")
+    assert fetched.status_code == 200
+    fetched_body = fetched.json()
+    assert fetched_body["status"] == "BLOCKED"
+    assert len(fetched_body["documents"]) == 2
+
+
+@pytest.mark.anyio
+async def test_submit_claim_decided_persists_with_fk_enforcement_on(client_factory_fk_enforced):
+    """Same FK-enforced check for a normal claim that reaches a decision —
+    confirms the fix didn't just move the bug to the successful path."""
+    data = {
+        "member_id": "EMP001",
+        "policy_id": "PLUM_GHI_2024",
+        "claim_category": "CONSULTATION",
+        "treatment_date": "2024-11-01",
+        "claimed_amount": "1500",
+    }
+    files = [
+        ("documents", ("rx.jpg", JPEG_BYTES, "image/jpeg")),
+        ("documents", ("bill.pdf", PDF_BYTES, "application/pdf")),
+    ]
+    ai_responses = [
+        {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.94},
+        {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.91},
+        PRESCRIPTION_EXTRACTION_RESPONSE,
+        HOSPITAL_BILL_EXTRACTION_RESPONSE,
+    ]
+    client = await client_factory_fk_enforced(ai_responses)
+    response = await client.post("/api/v1/claims", data=data, files=files)
+
+    assert response.status_code == 201
+    result = response.json()
+    assert result["status"] == "DECIDED"
+    assert result["decision"]["decision"] == "APPROVED"
+    assert len(result["documents"]) == 2
+
+    fetched = await client.get(f"/api/v1/claims/{result['claim_id']}")
+    assert fetched.status_code == 200
+    assert len(fetched.json()["documents"]) == 2

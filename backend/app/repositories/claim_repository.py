@@ -97,6 +97,24 @@ class ClaimRepository(BaseRepository[Claim, str]):
             row.created_at = claim.created_at
             row.updated_at = claim.updated_at
 
+            # Flush the parent claim row before adding any ClaimDocumentORM
+            # rows below. There is no SQLAlchemy relationship() between
+            # ClaimORM and ClaimDocumentORM (each ClaimDocumentORM sets its
+            # claim_id FK column directly), so the ORM unit-of-work has no
+            # dependency information linking the two mappers and does not
+            # guarantee the claims INSERT is emitted before the
+            # claim_documents INSERTs on a single flush/commit — it happened
+            # to violate that order here. SQLite doesn't enforce foreign
+            # keys unless a connection explicitly turns PRAGMA foreign_keys
+            # on (this app doesn't), so the bad order was invisible in local/
+            # SQLite testing; PostgreSQL always enforces the FK and raised
+            # ForeignKeyViolationError. Flushing here sends the claims INSERT
+            # (or the prior DELETE, for an update) to the database first,
+            # inside the same transaction — session.commit() in
+            # get_session() still covers everything, so a later failure
+            # still rolls back both the claim and its documents together.
+            await session.flush()
+
             extractions_by_file_id = (
                 {e.file_id: e for e in claim.extraction_result.extractions}
                 if claim.extraction_result
