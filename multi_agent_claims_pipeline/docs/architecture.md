@@ -807,8 +807,12 @@ schema conformance, depending on which provider is configured. Phase 2B's
 six extraction schemas (`app/ai/prompts/*_extraction.py`) are the second
 real proof of this abstraction, after Phase 2A's classification schema —
 `DocumentExtractionAgent` never imports `google.genai` or `anthropic`, and
-switching `AI_PROVIDER=gemini` → `AI_PROVIDER=anthropic` requires no
-change to the agent or any schema.
+switching `AI_PROVIDER=anthropic` → `AI_PROVIDER=gemini` (or back)
+requires no change to the agent or any schema — verified with a real
+config-only factory-selection check in both directions, not just asserted
+(see `docs/AI_HANDOFF.md` "AI Provider"). Anthropic Claude Sonnet
+(`claude-sonnet-4-5`) is the current default provider; Gemini remains a
+fully-supported alternate.
 
 ---
 

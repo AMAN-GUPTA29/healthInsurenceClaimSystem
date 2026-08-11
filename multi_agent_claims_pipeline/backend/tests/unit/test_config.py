@@ -21,8 +21,20 @@ class TestSettingsDefaults:
         s = Settings()
         assert s.app_env == Environment.DEVELOPMENT
 
-    def test_default_ai_provider_is_gemini(self):
-        s = Settings()
+    def test_default_ai_provider_is_gemini(self, monkeypatch):
+        """
+        Tests the Settings field's own declared default (`ai_provider:
+        AIProvider = AIProvider.GEMINI` in settings.py), isolated from
+        the environment/.env file — not "whichever provider this
+        deployment happens to be configured for" (as of the Anthropic
+        migration, backend/.env legitimately sets AI_PROVIDER=anthropic;
+        that's real active configuration, not a change to this field's
+        code-level default). `_env_file=None` skips dotenv loading for
+        this instance only; `AI_PROVIDER` is also cleared from the real
+        environment in case a shell/CI export is present.
+        """
+        monkeypatch.delenv("AI_PROVIDER", raising=False)
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
         assert s.ai_provider == AIProvider.GEMINI
 
     def test_default_ai_timeout(self):

@@ -53,7 +53,7 @@ multi_agent_claims_pipeline/
 
 ## Key Design Principles
 
-1. **AI provider abstraction** — Agents depend only on `AIProvider` (ABC). Vendor SDK imports exist ONLY inside their respective adapter: `app/ai/providers/gemini_provider.py` (default) and `app/ai/providers/anthropic_provider.py` (alternate). Switching `AI_PROVIDER=gemini` → `AI_PROVIDER=anthropic` is a configuration change, not a code change.
+1. **AI provider abstraction** — Agents depend only on `AIProvider` (ABC). Vendor SDK imports exist ONLY inside their respective adapter: `app/ai/providers/anthropic_provider.py` (default — Claude Sonnet) and `app/ai/providers/gemini_provider.py` (alternate). Switching `AI_PROVIDER=anthropic` → `AI_PROVIDER=gemini` is a configuration change, not a code change.
 2. **No hardcoded policy rules** — every rule (limits, waiting periods, exclusions, network hospitals, fraud thresholds) is read from `policy_terms.json` through `PolicyRepository`.
 3. **Deterministic financials and decisions** — the LLM never computes an amount, decides coverage, or chooses the final decision. `PolicyEngine`, `FinancialCalculationService`, `FraudAnalysisAgent`, and `DecisionGenerationAgent` make zero AI calls; the LLM (`ExplanationAgent`) only writes up an already-decided outcome in plain language, and cannot change it.
 4. **Dependency injection** — agents receive `AIProvider`/`PolicyRepository`/etc. via constructor, never via module globals.
@@ -68,7 +68,7 @@ multi_agent_claims_pipeline/
 
 - Python 3.11+
 - Node.js 18+ (for frontend)
-- A Google Gemini API key (default provider) — get one at [Google AI Studio](https://aistudio.google.com/apikey), **or** an Anthropic API key (see "Switching AI provider" below)
+- An Anthropic API key (default provider — Claude Sonnet) — get one at [console.anthropic.com](https://console.anthropic.com/), **or** a Google Gemini API key (see "Switching AI provider" below)
 
 ### Backend
 
@@ -85,7 +85,7 @@ pip install -r requirements.txt
 
 # Configure environment (.env lives at the project root)
 cp ../.env.example ../.env
-# Edit ../.env and set GEMINI_API_KEY=your-key-here
+# Edit ../.env and set ANTHROPIC_API_KEY=your-key-here
 
 # Run the backend
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -109,23 +109,23 @@ npm run dev
 
 Frontend available at: http://localhost:5173 (proxies API calls to the backend at `http://localhost:8000` — see `VITE_API_BASE_URL` if you need to point it elsewhere).
 
-### Switching AI provider (Gemini ↔ Claude)
+### Switching AI provider (Claude ↔ Gemini)
 
 No code changes are required. In `.env`:
 
 ```bash
-# Gemini (default)
+# Anthropic Claude Sonnet (default — cost-efficient, not Opus)
+AI_PROVIDER=anthropic
+AI_MODEL=claude-sonnet-4-5
+ANTHROPIC_API_KEY=your-anthropic-key
+
+# Google Gemini (alternate)
 AI_PROVIDER=gemini
 AI_MODEL=gemini-flash-latest
 GEMINI_API_KEY=your-gemini-key
-
-# Anthropic Claude
-AI_PROVIDER=anthropic
-AI_MODEL=claude-sonnet-4-5-20250929   # or another Claude model
-ANTHROPIC_API_KEY=your-anthropic-key
 ```
 
-Restart the backend after changing `.env`. `app/ai/providers/factory.py` selects the concrete provider at startup based on `AI_PROVIDER` alone; no agent, prompt, or pipeline code references either vendor SDK directly.
+Restart the backend after changing `.env`. `app/ai/providers/factory.py` selects the concrete provider at startup based on `AI_PROVIDER` alone; no agent, prompt, or pipeline code references either vendor SDK directly. Verified live both ways — see `docs/AI_HANDOFF.md` "AI Provider" for the full account (real Claude API call, a real end-to-end claim through the complete pipeline, and a config-only factory-selection check confirming both directions work without touching application code).
 
 ---
 
@@ -137,11 +137,11 @@ See [.env.example](.env.example) for all configuration options.
 |----------|---------|-------------|
 | `APP_ENV` | `development` | Application environment |
 | `DATABASE_URL` | SQLite (`./data/claims.db`) | SQLAlchemy async URL — change to a PostgreSQL URL for production, see `docs/architecture.md` "Scaling to 10x Load" |
-| `AI_PROVIDER` | `gemini` | AI provider (`gemini`, `anthropic`) |
-| `AI_MODEL` | `gemini-flash-latest` | Model identifier for the configured provider |
+| `AI_PROVIDER` | `anthropic` | AI provider (`anthropic`, `gemini`) |
+| `AI_MODEL` | `claude-sonnet-4-5` | Model identifier for the configured provider |
 | `AI_TIMEOUT_SECONDS` | `60` | AI API call timeout |
-| `GEMINI_API_KEY` | — | **Required** when `AI_PROVIDER=gemini` |
 | `ANTHROPIC_API_KEY` | — | **Required** when `AI_PROVIDER=anthropic` |
+| `GEMINI_API_KEY` | — | **Required** when `AI_PROVIDER=gemini` |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 | `CORS_ORIGINS` | `http://localhost:5173`, `http://localhost:3000` | Allowed frontend origins — set to your deployed frontend's origin in production |
 
@@ -222,7 +222,7 @@ No containerized deployment is provided in this repository (Docker was removed a
 
 The full, current list (with reasoning for each) lives in `docs/AI_HANDOFF.md` "Known Issues". The most significant:
 
-- **No live Gemini/Claude verification in this development environment** — a corporate SSL-inspection proxy blocks outbound HTTPS to both providers' APIs (`CERTIFICATE_VERIFY_FAILED`). TLS verification was never disabled to work around this; every AI-calling component has been verified to fail gracefully (structured error, reduced confidence, deterministic fallback where applicable — never a crash) both in tests (mocked failures) and live against the real, initialized provider (real SSL failure, real fallback). See `docs/AI_HANDOFF.md` "Verification".
+- **Live Gemini verification is blocked in this development environment** — a corporate SSL-inspection proxy blocks outbound HTTPS to Google's API (`CERTIFICATE_VERIFY_FAILED`; occasionally succeeds, so likely intermittent rather than a hard block — see `docs/AI_HANDOFF.md` Known Issue 22). **Live Anthropic/Claude calls are not blocked** — the current default provider (Claude Sonnet) has been verified with real API calls (structured generation, document classification, document extraction, and explanation generation) through the actual running application, not just mocks. TLS verification has never been disabled to work around either provider's connectivity. Every AI-calling component has also been verified to fail gracefully (structured error, reduced confidence, deterministic fallback where applicable — never a crash) in unit tests with fake providers. See `docs/AI_HANDOFF.md` "AI Provider" / "Verification".
 - **No database migrations** — schema changes require recreating the SQLite dev database; PostgreSQL + Alembic is the natural next step before further schema evolution.
 - **Sequential per-document AI calls** — classification/extraction calls are awaited one at a time per claim, not batched or parallelized. See `docs/architecture.md` "Scaling to 10x Load".
 - **Session-count and pre-existing-condition tracking** — a small number of policy checks (`max_sessions_per_year`, pre-existing-condition waiting periods) are reported as `WARNING` (honestly "cannot verify"), not computed, since the current data model has no field for the history they'd need.
