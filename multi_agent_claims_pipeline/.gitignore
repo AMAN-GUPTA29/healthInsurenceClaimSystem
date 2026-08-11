@@ -58,6 +58,10 @@ coverage/
 *.sqlite3
 data/*.db
 
+# ── Uploaded claim documents (dev/runtime artifacts, never source) ──────────
+backend/data/uploads/*
+!backend/data/uploads/.gitkeep
+
 # ── Node / Frontend ─────────────────────────────────────────────────────────
 node_modules/
 frontend/dist/
