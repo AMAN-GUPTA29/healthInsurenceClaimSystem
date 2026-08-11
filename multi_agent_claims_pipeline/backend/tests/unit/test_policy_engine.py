@@ -492,6 +492,58 @@ class TestS_DiagnosticHighValuePreAuth:
         assert result.requires_pre_authorization is True
 
 
+class TestT_NetworkHospitalConfidenceRelevance:
+    """
+    Phase 3 correctness fix: an unresolvable hospital name (NETWORK_HOSPITAL
+    WARNING) must only degrade `confidence` when network status could
+    plausibly change the payable amount — never when the claim is already
+    headed for a claim-level rejection unrelated to money (TC012, an
+    obesity-exclusion rejection, expects confidence_score above 0.90; the
+    hospital is irrelevant to that outcome), and never for a category with
+    no network discount at all (network status can't affect a payable
+    amount that doesn't exist).
+    """
+
+    @pytest.mark.anyio
+    async def test_unknown_hospital_caps_confidence_when_otherwise_clean(self, engine):
+        """CONSULTATION (20% network discount) with no hospital name and no
+        other rejection reason — network status is genuinely undetermined
+        AND could have mattered, so the 0.6 cap still applies."""
+        claim = make_claim(hospital_name=None, extractions=[_prescription_extraction("F1", diagnosis="Viral Fever")])
+        result = await engine.evaluate(claim)
+        assert _finding(result, "NETWORK_HOSPITAL").status == PolicyRuleStatus.WARNING
+        assert result.confidence == 0.6
+
+    @pytest.mark.anyio
+    async def test_unknown_hospital_does_not_cap_confidence_when_claim_already_rejected(self, engine):
+        """TC012-shaped: obesity exclusion (a claim-level rejection) means
+        the claim never reaches a network-discount calculation at all — an
+        unknown hospital name must not drag confidence down for a reason
+        that can't affect the outcome."""
+        claim = make_claim(
+            member_id="EMP009", member_name="Anita Desai", hospital_name=None,
+            extractions=[_prescription_extraction("F1", diagnosis="Morbid Obesity", treatment="Bariatric Consultation")],
+        )
+        result = await engine.evaluate(claim)
+        assert _finding(result, "NETWORK_HOSPITAL").status == PolicyRuleStatus.WARNING
+        assert result.exclusion_applies is True
+        assert result.confidence > 0.6
+
+    @pytest.mark.anyio
+    async def test_unknown_hospital_does_not_cap_confidence_for_category_with_no_network_discount(self, engine):
+        """DENTAL has no network_discount_percent configured — an unknown
+        hospital name cannot possibly change a dental claim's payable
+        amount, so it must not reduce confidence either."""
+        claim = make_claim(
+            category=ClaimCategory.DENTAL, hospital_name=None,
+            documents=[DocumentMetadata(file_id="F1", file_name="bill.jpg", detected_type=DocumentType.HOSPITAL_BILL, quality=DocumentQuality.GOOD)],
+            extractions=[_hospital_bill_extraction("F1", line_items=[LineItem(description="Root Canal Treatment", amount=Decimal("5000"))], total=Decimal("5000"))],
+        )
+        result = await engine.evaluate(claim)
+        assert _finding(result, "NETWORK_HOSPITAL").status == PolicyRuleStatus.WARNING
+        assert result.confidence > 0.6
+
+
 # ── Shared fixture builders ──────────────────────────────────────────────────
 
 

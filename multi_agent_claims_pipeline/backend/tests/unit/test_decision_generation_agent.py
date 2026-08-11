@@ -283,6 +283,78 @@ class TestFraudManualReview:
         assert decision.decision == DecisionType.REJECTED
 
 
+class TestPerClaimLimitExceededRejected:
+    """
+    Phase 3 correctness fix: the previous implementation applied
+    sub_limit/per_claim_limit as FinancialCalculationService caps, which
+    directly contradicted test_cases.json's own TC006/TC010 worked
+    amounts. The corrected reading: per_claim_limit is a whole-claim
+    REJECT gate, evaluated only when there is no line-item-driven partial
+    eligibility to trust instead. See docs/tradeoffs.md "Decision
+    Precedence" for the full derivation.
+    """
+
+    @pytest.mark.anyio
+    async def test_claimed_amount_over_per_claim_limit_with_no_line_items_is_rejected(self, agent):
+        """TC008-shaped: claimed 7500 > per_claim_limit 5000, no itemized
+        line items (not DENTAL/VISION) — the whole claim is REJECTED, not
+        capped to a partial payable amount."""
+        policy = _policy()
+        financial = _financial(claimed_amount=Decimal("7500"), eligible_amount=Decimal("7500"), payable_amount=Decimal("7500"))
+        claim = make_claim(claimed_amount="7500", policy=policy, financial=financial, fraud=_fraud())
+        decision = await agent.run(claim)
+        assert decision.decision == DecisionType.REJECTED
+        assert decision.approved_amount == Decimal("0")
+        assert RejectionReason.PER_CLAIM_EXCEEDED in decision.rejection_reasons
+        assert decision.reason_code == "REJECTED_PER_CLAIM_EXCEEDED"
+
+    @pytest.mark.anyio
+    async def test_claimed_amount_at_or_under_per_claim_limit_is_not_rejected(self, agent):
+        """TC010-shaped: claimed 4500 <= per_claim_limit 5000 — no rejection,
+        the claim proceeds to a normal APPROVED decision at the full
+        (discount/copay-adjusted) payable amount."""
+        policy = _policy()
+        financial = _financial(claimed_amount=Decimal("4500"), eligible_amount=Decimal("4500"), payable_amount=Decimal("3240"))
+        claim = make_claim(claimed_amount="4500", policy=policy, financial=financial, fraud=_fraud())
+        decision = await agent.run(claim)
+        assert decision.decision == DecisionType.APPROVED
+        assert decision.approved_amount == Decimal("3240")
+        assert decision.rejection_reasons == []
+
+    @pytest.mark.anyio
+    async def test_line_item_driven_partial_eligibility_is_trusted_over_per_claim_limit(self, agent):
+        """TC006-shaped: claimed 12000 > per_claim_limit 5000, but line-item
+        exclusion already establishes a lower, trusted eligible amount
+        (8000) — the per-claim-limit gate must NOT fire; the claim is
+        PARTIAL at the full line-item-eligible amount, not rejected and
+        not further capped to 5000."""
+        line_items = [
+            LineItemPolicyFinding(description="Root Canal", amount=Decimal("8000"), excluded=False),
+            LineItemPolicyFinding(description="Teeth Whitening", amount=Decimal("4000"), excluded=True, reason="Cosmetic"),
+        ]
+        policy = _policy(exclusion_applies=True, line_item_findings=line_items)
+        financial = _financial(claimed_amount=Decimal("12000"), eligible_amount=Decimal("8000"), payable_amount=Decimal("8000"))
+        claim = make_claim(claimed_amount="12000", policy=policy, financial=financial, fraud=_fraud())
+        decision = await agent.run(claim)
+        assert decision.decision == DecisionType.PARTIAL
+        assert decision.approved_amount == Decimal("8000")
+        assert RejectionReason.PER_CLAIM_EXCEEDED not in decision.rejection_reasons
+
+    @pytest.mark.anyio
+    async def test_claim_level_exclusion_reported_alone_even_when_per_claim_limit_also_exceeded(self, agent):
+        """TC012-shaped: claim-level exclusion AND claimed amount (8000)
+        exceeds per_claim_limit (5000) — only EXCLUDED_CONDITION is
+        reported, matching test_cases.json's own single-reason expectation.
+        The per-claim-limit gate is only evaluated when no other rejection
+        reason already applies."""
+        policy = _policy(exclusion_applies=True)
+        financial = _financial(claimed_amount=Decimal("8000"), eligible_amount=Decimal("8000"), payable_amount=Decimal("8000"))
+        claim = make_claim(claimed_amount="8000", policy=policy, financial=financial, fraud=_fraud())
+        decision = await agent.run(claim)
+        assert decision.decision == DecisionType.REJECTED
+        assert decision.rejection_reasons == [RejectionReason.EXCLUDED_CONDITION]
+
+
 class TestZeroPayableRejected:
     @pytest.mark.anyio
     async def test_zero_payable_is_rejected(self, agent):

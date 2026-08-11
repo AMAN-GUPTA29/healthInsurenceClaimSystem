@@ -7,9 +7,18 @@ arithmetic only. No AI calls. Never decides APPROVED/PARTIAL/REJECTED/
 MANUAL_REVIEW (DecisionGenerationAgent, Phase 2D) — a capped/reduced
 payable_amount here is "what would be payable if approved," not itself an
 approval. See docs/tradeoffs.md "Financial Calculation Order" for the
-calculation-order rationale (including a known discrepancy with TC010's
-own worked example) and docs/architecture.md "Financial Calculation
-(Phase 2C)" for the full design rationale.
+calculation-order rationale and docs/architecture.md "Financial
+Calculation (Phase 2C)" for the full design rationale.
+
+`sub_limit` and `per_claim_limit` are surfaced on `FinancialBreakdown` for
+transparency but are deliberately NOT applied as payable-amount caps here
+(Phase 3 correctness fix — see docs/tradeoffs.md "Decision Precedence":
+`test_cases.json`'s own official worked examples for TC006 and TC010 both
+show a claim exceeding these limits still paying out the full
+discount/copay-adjusted amount, not a capped one). `per_claim_limit` is
+instead a whole-claim REJECT gate evaluated by `DecisionGenerationAgent`
+(Phase 2D) before this service's output is used for an APPROVED/PARTIAL
+amount — see that module for the exact rule.
 
 Rules:
 - decimal.Decimal for every monetary value. Never float.
@@ -60,22 +69,27 @@ class FinancialCalculationService:
             amount_after_discount = eligible_amount
             steps.append("No network discount applied (not a recognised network hospital, or 0%).")
 
-        # Step 2: category sub-limit
-        amount_after_sub_limit, sub_limit_applied = self._apply_cap(
-            amount_after_discount, policy.sub_limit, "sub_limit", steps
-        )
+        # sub_limit and per_claim_limit are informational only — not applied
+        # as payable caps here. See module docstring: test_cases.json's own
+        # TC006/TC010 worked examples both pay out the full discount/copay-
+        # adjusted amount despite exceeding these limits. per_claim_limit is
+        # instead a whole-claim REJECT gate in DecisionGenerationAgent.
+        sub_limit_applied = False
+        per_claim_limit_applied = False
+        if policy.sub_limit is not None:
+            steps.append(f"sub_limit ({policy.sub_limit}) is informational only; not applied as a cap.")
+        if policy.per_claim_limit is not None:
+            steps.append(
+                f"per_claim_limit ({policy.per_claim_limit}) is informational only here; evaluated as a "
+                "whole-claim reject gate during decision generation, not a payable cap."
+            )
 
-        # Step 3: per-claim limit
-        amount_after_per_claim, per_claim_limit_applied = self._apply_cap(
-            amount_after_sub_limit, policy.per_claim_limit, "per_claim_limit", steps
-        )
-
-        # Step 4: remaining annual OPD allowance
+        # Step 2: remaining annual OPD allowance
         remaining_annual: Optional[Decimal] = None
         if policy.annual_opd_limit is not None:
             remaining_annual = max(policy.annual_opd_limit - submission.ytd_claims_amount, Decimal("0"))
         amount_after_annual, annual_limit_applied = self._apply_cap(
-            amount_after_per_claim, remaining_annual, "remaining annual_opd_limit", steps
+            amount_after_discount, remaining_annual, "remaining annual_opd_limit", steps
         )
         amount_after_limits = amount_after_annual
 

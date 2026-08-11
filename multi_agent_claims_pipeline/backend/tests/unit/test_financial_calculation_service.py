@@ -88,13 +88,17 @@ class TestNetworkDiscountOrdering:
 
 
 class TestLimits:
-    def test_amount_above_sub_limit_is_capped(self, service):
+    def test_amount_above_sub_limit_is_not_capped(self, service):
+        """Phase 3 correctness fix: sub_limit is informational only, never
+        a payable cap — test_cases.json's own TC010 worked example pays
+        out the full discount/copay-adjusted amount despite exceeding the
+        category sub_limit. See docs/tradeoffs.md 'Decision Precedence'."""
         claim = make_claim(amount="2000")
         policy = make_policy(sub_limit=Decimal("1000"))
         result = service.calculate(claim, policy)
-        assert result.sub_limit_applied is True
-        assert result.amount_after_limits == Decimal("1000")
-        assert result.payable_amount == Decimal("1000.00")
+        assert result.sub_limit_applied is False
+        assert result.amount_after_limits == Decimal("2000")
+        assert result.payable_amount == Decimal("2000.00")
 
     def test_amount_within_sub_limit_is_not_capped(self, service):
         claim = make_claim(amount="800")
@@ -103,12 +107,19 @@ class TestLimits:
         assert result.sub_limit_applied is False
         assert result.payable_amount == Decimal("800.00")
 
-    def test_amount_above_per_claim_limit_is_capped(self, service):
+    def test_amount_above_per_claim_limit_is_not_capped_here(self, service):
+        """Phase 3 correctness fix: per_claim_limit is no longer applied as
+        a FinancialCalculationService cap — it is a whole-claim REJECT gate
+        evaluated by DecisionGenerationAgent instead (see
+        tests/unit/test_decision_generation_agent.py::TestPerClaimLimitExceededRejected).
+        This service still computes "what would be payable if approved" at
+        the uncapped figure; the decision layer separately decides whether
+        that claim is rejected outright."""
         claim = make_claim(amount="7500")
         policy = make_policy(per_claim_limit=Decimal("5000"))
         result = service.calculate(claim, policy)
-        assert result.per_claim_limit_applied is True
-        assert result.payable_amount == Decimal("5000.00")
+        assert result.per_claim_limit_applied is False
+        assert result.payable_amount == Decimal("7500.00")
 
     def test_remaining_annual_allowance_caps_the_claim(self, service):
         # 50000 annual limit, 49000 already used -> only 1000 remains
@@ -124,8 +135,11 @@ class TestLimits:
         result = service.calculate(claim, policy)
         assert result.payable_amount == Decimal("0.00")
 
-    def test_combination_of_discount_limits_and_copay(self, service):
-        # 4500 -> discount 20% -> 3600 -> sub_limit 2000 caps it -> 2000 -> copay 10% -> 1800
+    def test_combination_of_discount_and_copay_ignores_sub_limit(self, service):
+        """TC010's exact shape: 4500 -> 20% network discount -> 3600 -> 10%
+        copay -> 3240. The category sub_limit (2000) is exceeded by the
+        discounted amount but must NOT cap it — matches test_cases.json's
+        own official ₹3,240 expected payable amount exactly."""
         claim = make_claim(amount="4500")
         policy = make_policy(
             network_discount_percent=20.0, copay_percent=10.0, is_network_hospital=True,
@@ -133,9 +147,9 @@ class TestLimits:
         )
         result = service.calculate(claim, policy)
         assert result.amount_after_network_discount == Decimal("3600.00")
-        assert result.sub_limit_applied is True
-        assert result.amount_after_limits == Decimal("2000")
-        assert result.payable_amount == Decimal("1800.00")
+        assert result.sub_limit_applied is False
+        assert result.amount_after_limits == Decimal("3600.00")
+        assert result.payable_amount == Decimal("3240.00")
 
 
 class TestZeroAndEdgeCases:

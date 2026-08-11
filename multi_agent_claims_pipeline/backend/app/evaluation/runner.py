@@ -10,29 +10,66 @@ Design:
   the exact same objects the API endpoint uses, not a parallel/fake path.
 - Expected-outcome checking (what counts as PASS/FAIL for a given case)
   lives entirely in this module, never inside an agent or ClaimsPipeline.
-  Agents have no knowledge that "TC001" exists.
-- Only TC001-TC003 have checkers implemented (Phase 2A scope). Running
-  any other case returns a result explaining no checker exists yet,
-  rather than silently reporting PASS or FAIL.
+  Agents have no knowledge that "TC001" exists — no `if case_id ==
+  "TC008"` branching exists anywhere in the pipeline/agents, only here,
+  where checking a fixed expectation against a real run is exactly the
+  evaluation harness's job.
+- TC001-TC003 (Phase 2A, document-problem detection) run with no
+  document extraction — there is nothing to extract before a claim
+  decision would ever be reached. TC004-TC012 (Phase 2D, full decision)
+  additionally have each document's `content` block (test_cases.json's
+  own structured ground truth) converted into a `ClaimExtractionResult`
+  fixture — the exact "compute a decision from real Gemini-shaped output"
+  path DocumentExtractionAgent would produce on these clean, unambiguous
+  documents, standing in for a real (SSL-blocked in this environment,
+  see docs/AI_HANDOFF.md Known Issue 22) Gemini call — see
+  `_extraction_result_from_test_case` below and docs/eval-report.md
+  "Methodology" for the full justification. Policy/Financial/Fraud/
+  Decision Generation make no AI calls at all, so this substitution
+  affects only which extraction path produced the input text, never
+  their own logic.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from decimal import Decimal as _D
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.agents.claim_validation_agent import ClaimValidationAgent
 from app.agents.cross_document_validation_agent import CrossDocumentValidationAgent
+from app.agents.decision_generation_agent import DecisionGenerationAgent
 from app.agents.document_verification_agent import DocumentVerificationAgent
+from app.agents.explanation_agent import ExplanationAgent
+from app.agents.fraud_analysis_agent import FraudAnalysisAgent
 from app.config.paths import resolve_source_file
-from app.domain.models import Claim, ClaimStatus
+from app.domain.extraction import (
+    ClaimExtractionResult,
+    DoctorInfo,
+    DocumentExtractionResult,
+    HospitalBillExtraction,
+    LabReportExtraction,
+    LabTestResult,
+    LineItem,
+    Medication,
+    PatientInfo,
+    PrescriptionExtraction,
+)
+from app.domain.models import Claim, ClaimStatus, DecisionType, DocumentQuality
 from app.domain.trace import TraceContext, TraceEvent
 from app.domain.verification import CrossDocumentValidationStatus, DocumentVerificationStatus
 from app.pipeline.pipeline import ClaimsPipeline
+from app.policy.policy_engine import PolicyEngine
 from app.policy.policy_repository import PolicyRepository
 from app.services.document_input_adapter import ClaimDocumentInput, ClaimSubmissionRequest, DocumentInputAdapter
+from app.services.financial_calculation_service import FinancialCalculationService
 from app.tracing.service import TraceService
+
+# Fixture-based extraction confidence — see module docstring. Not AI-supplied
+# (there is no real AI call in this path), so a fixed, clearly-a-fixture
+# value is used rather than fabricating a "realistic-looking" score.
+_FIXTURE_EXTRACTION_CONFIDENCE = 0.95
 
 
 @dataclass
@@ -89,7 +126,83 @@ def request_from_test_case(case: Dict[str, Any]) -> ClaimSubmissionRequest:
         hospital_name=raw_input.get("hospital_name"),
         ytd_claims_amount=raw_input.get("ytd_claims_amount", 0),
         documents=documents,
+        claims_history=raw_input.get("claims_history", []),
         simulate_component_failure=raw_input.get("simulate_component_failure", False),
+    )
+
+
+def _extraction_result_from_test_case(case: Dict[str, Any]) -> Optional[ClaimExtractionResult]:
+    """
+    Builds a `ClaimExtractionResult` directly from each document's
+    `content` block (TC004-TC012 only — TC001-TC003 carry no `content`,
+    since they test stopping before extraction would ever run). See
+    module docstring for why this fixture-based substitution is
+    equivalent, for Policy/Financial/Fraud/Decision purposes, to a real
+    Gemini extraction call on these clean, unambiguous documents.
+    """
+    documents = case["input"].get("documents", [])
+    extractions: List[DocumentExtractionResult] = []
+    for doc in documents:
+        content = doc.get("content")
+        if content is None:
+            continue
+        actual_type = doc["actual_type"]
+        patient_name = content.get("patient_name")
+
+        if actual_type == "PRESCRIPTION":
+            payload = PrescriptionExtraction(
+                confidence=_FIXTURE_EXTRACTION_CONFIDENCE,
+                patient=PatientInfo(name=patient_name),
+                doctor=DoctorInfo(
+                    name=content.get("doctor_name"),
+                    registration_number=content.get("doctor_registration"),
+                ),
+                diagnosis=content.get("diagnosis"),
+                treatment=content.get("treatment"),
+                medications=[Medication(name=m) for m in content.get("medicines", [])],
+                investigations=content.get("tests_ordered", []),
+            )
+        elif actual_type == "HOSPITAL_BILL":
+            payload = HospitalBillExtraction(
+                confidence=_FIXTURE_EXTRACTION_CONFIDENCE,
+                patient_name=patient_name,
+                hospital_name=content.get("hospital_name"),
+                line_items=[
+                    LineItem(description=li["description"], amount=li.get("amount"))
+                    for li in content.get("line_items", [])
+                ],
+                total=content.get("total"),
+            )
+        elif actual_type == "LAB_REPORT":
+            test_name = content.get("test_name")
+            payload = LabReportExtraction(
+                confidence=_FIXTURE_EXTRACTION_CONFIDENCE,
+                tests=[LabTestResult(test_name=test_name)] if test_name else [],
+            )
+        else:
+            # No extraction schema for this document type in the assignment's
+            # 12 official cases (see SUPPORTED_EXTRACTION_TYPES) — skipped,
+            # not a failure, matching DocumentExtractionAgent's own contract.
+            continue
+
+        extractions.append(
+            DocumentExtractionResult(
+                file_id=doc["file_id"],
+                document_type=actual_type,
+                quality=DocumentQuality.GOOD,
+                patient=PatientInfo(name=patient_name),
+                extraction=payload,
+            )
+        )
+
+    if not extractions:
+        return None
+    return ClaimExtractionResult(
+        extractions=extractions,
+        failures=[],
+        skipped=[],
+        confidence=_FIXTURE_EXTRACTION_CONFIDENCE,
+        has_failures=False,
     )
 
 
@@ -110,6 +223,10 @@ async def run_test_case(
     adapter = DocumentInputAdapter()
     submission, classifications = adapter.to_domain(request)
     claim = Claim(submission=submission)
+    # Fixture-based extraction (TC004-TC012 only — see module docstring).
+    # Set BEFORE pipeline.run(): no document_extraction_agent is wired
+    # below, so Stage 4 is legitimately SKIPPED and never overwrites this.
+    claim.extraction_result = _extraction_result_from_test_case(case)
 
     pipeline = ClaimsPipeline(
         claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
@@ -117,6 +234,14 @@ async def run_test_case(
             ai_provider=None, policy_repository=policy_repository
         ),
         cross_document_validation_agent=CrossDocumentValidationAgent(),
+        policy_engine=PolicyEngine(policy_repository=policy_repository),
+        financial_calculation_service=FinancialCalculationService(),
+        fraud_analysis_agent=FraudAnalysisAgent(policy_repository=policy_repository),
+        decision_generation_agent=DecisionGenerationAgent(),
+        # No AI provider — see module docstring; ExplanationAgent's own
+        # deterministic fallback still runs and is reported honestly via
+        # explanation_detail.source == "FALLBACK", never faked as "AI".
+        explanation_agent=ExplanationAgent(ai_provider=None),
     )
 
     sink = None
@@ -216,8 +341,161 @@ def _check_tc003(claim: Claim) -> Tuple[bool, List[str]]:
     return (len(reasons) == 0, reasons)
 
 
+def _rejection_values(claim: Claim) -> List[str]:
+    if claim.decision is None:
+        return []
+    return [r.value for r in claim.decision.rejection_reasons]
+
+
+def _check_tc004(claim: Claim) -> Tuple[bool, List[str]]:
+    """TC004 — Clean Consultation: APPROVED, ₹1350 payable, confidence > 0.85."""
+    reasons: List[str] = []
+    decision = claim.decision
+    if decision is None:
+        return (False, ["no decision was generated"])
+    if decision.decision != DecisionType.APPROVED:
+        reasons.append(f"expected decision APPROVED, got {decision.decision.value}")
+    if decision.approved_amount != _D("1350.00"):
+        reasons.append(f"expected approved_amount 1350.00, got {decision.approved_amount}")
+    if decision.confidence_score <= 0.85:
+        reasons.append(f"expected confidence_score > 0.85, got {decision.confidence_score}")
+    return (len(reasons) == 0, reasons)
+
+
+def _check_tc005(claim: Claim) -> Tuple[bool, List[str]]:
+    """TC005 — Waiting Period (Diabetes): REJECTED, WAITING_PERIOD."""
+    reasons: List[str] = []
+    decision = claim.decision
+    if decision is None:
+        return (False, ["no decision was generated"])
+    if decision.decision != DecisionType.REJECTED:
+        reasons.append(f"expected decision REJECTED, got {decision.decision.value}")
+    if "WAITING_PERIOD" not in _rejection_values(claim):
+        reasons.append(f"expected WAITING_PERIOD in rejection_reasons, got {_rejection_values(claim)}")
+    return (len(reasons) == 0, reasons)
+
+
+def _check_tc006(claim: Claim) -> Tuple[bool, List[str]]:
+    """TC006 — Dental Partial Approval: PARTIAL, ₹8000 payable, itemized."""
+    reasons: List[str] = []
+    decision = claim.decision
+    if decision is None:
+        return (False, ["no decision was generated"])
+    if decision.decision != DecisionType.PARTIAL:
+        reasons.append(f"expected decision PARTIAL, got {decision.decision.value}")
+    if decision.approved_amount != _D("8000.00"):
+        reasons.append(f"expected approved_amount 8000.00, got {decision.approved_amount}")
+    if len(decision.line_item_decisions) != 2:
+        reasons.append(f"expected 2 itemized line-item decisions, got {len(decision.line_item_decisions)}")
+    else:
+        approved_items = [li for li in decision.line_item_decisions if li.approved]
+        rejected_items = [li for li in decision.line_item_decisions if not li.approved]
+        if len(approved_items) != 1 or len(rejected_items) != 1:
+            reasons.append("expected exactly one approved and one rejected line item")
+        elif rejected_items[0].notes is None and rejected_items[0].rejection_reason is None:
+            reasons.append("rejected line item has no stated reason")
+    return (len(reasons) == 0, reasons)
+
+
+def _check_tc007(claim: Claim) -> Tuple[bool, List[str]]:
+    """TC007 — MRI Without Pre-Authorization: REJECTED, PRE_AUTH_MISSING."""
+    reasons: List[str] = []
+    decision = claim.decision
+    if decision is None:
+        return (False, ["no decision was generated"])
+    if decision.decision != DecisionType.REJECTED:
+        reasons.append(f"expected decision REJECTED, got {decision.decision.value}")
+    if "PRE_AUTH_MISSING" not in _rejection_values(claim):
+        reasons.append(f"expected PRE_AUTH_MISSING in rejection_reasons, got {_rejection_values(claim)}")
+    return (len(reasons) == 0, reasons)
+
+
+def _check_tc008(claim: Claim) -> Tuple[bool, List[str]]:
+    """TC008 — Per-Claim Limit Exceeded: REJECTED, PER_CLAIM_EXCEEDED."""
+    reasons: List[str] = []
+    decision = claim.decision
+    if decision is None:
+        return (False, ["no decision was generated"])
+    if decision.decision != DecisionType.REJECTED:
+        reasons.append(f"expected decision REJECTED, got {decision.decision.value}")
+    if "PER_CLAIM_EXCEEDED" not in _rejection_values(claim):
+        reasons.append(f"expected PER_CLAIM_EXCEEDED in rejection_reasons, got {_rejection_values(claim)}")
+    return (len(reasons) == 0, reasons)
+
+
+def _check_tc009(claim: Claim) -> Tuple[bool, List[str]]:
+    """TC009 — Fraud Signal (Multiple Same-Day Claims): MANUAL_REVIEW,
+    with the specific triggering signal(s) surfaced in the output."""
+    reasons: List[str] = []
+    decision = claim.decision
+    if decision is None:
+        return (False, ["no decision was generated"])
+    if decision.decision != DecisionType.MANUAL_REVIEW:
+        reasons.append(f"expected decision MANUAL_REVIEW, got {decision.decision.value}")
+    if not decision.fraud_signals:
+        reasons.append("expected at least one fraud signal to be included in the output")
+    return (len(reasons) == 0, reasons)
+
+
+def _check_tc010(claim: Claim) -> Tuple[bool, List[str]]:
+    """TC010 — Network Hospital Discount: APPROVED, ₹3240 payable (discount
+    before copay, no sub-limit cap — see docs/tradeoffs.md)."""
+    reasons: List[str] = []
+    decision = claim.decision
+    if decision is None:
+        return (False, ["no decision was generated"])
+    if decision.decision != DecisionType.APPROVED:
+        reasons.append(f"expected decision APPROVED, got {decision.decision.value}")
+    if decision.approved_amount != _D("3240.00"):
+        reasons.append(f"expected approved_amount 3240.00, got {decision.approved_amount}")
+    return (len(reasons) == 0, reasons)
+
+
+def _check_tc011(claim: Claim) -> Tuple[bool, List[str]]:
+    """TC011 — Component Failure (Graceful Degradation): APPROVED, no
+    crash, reduced confidence, manual review recommended."""
+    reasons: List[str] = []
+    decision = claim.decision
+    if decision is None:
+        return (False, ["no decision was generated — the pipeline must not crash on a component failure"])
+    if decision.decision != DecisionType.APPROVED:
+        reasons.append(f"expected decision APPROVED, got {decision.decision.value}")
+    if not decision.has_component_failures:
+        reasons.append("expected has_component_failures=True (the simulated failure must be visible)")
+    if decision.confidence_score >= 1.0:
+        reasons.append(f"expected a reduced confidence score, got {decision.confidence_score}")
+    if not decision.manual_review_recommended:
+        reasons.append("expected manual_review_recommended=True")
+    return (len(reasons) == 0, reasons)
+
+
+def _check_tc012(claim: Claim) -> Tuple[bool, List[str]]:
+    """TC012 — Excluded Treatment (Obesity): REJECTED, EXCLUDED_CONDITION,
+    confidence > 0.90."""
+    reasons: List[str] = []
+    decision = claim.decision
+    if decision is None:
+        return (False, ["no decision was generated"])
+    if decision.decision != DecisionType.REJECTED:
+        reasons.append(f"expected decision REJECTED, got {decision.decision.value}")
+    if "EXCLUDED_CONDITION" not in _rejection_values(claim):
+        reasons.append(f"expected EXCLUDED_CONDITION in rejection_reasons, got {_rejection_values(claim)}")
+    if decision.confidence_score <= 0.90:
+        reasons.append(f"expected confidence_score > 0.90, got {decision.confidence_score}")
+    return (len(reasons) == 0, reasons)
+
+
 _CHECKERS: Dict[str, Callable[[Claim], Tuple[bool, List[str]]]] = {
     "TC001": _check_tc001,
     "TC002": _check_tc002,
     "TC003": _check_tc003,
+    "TC004": _check_tc004,
+    "TC005": _check_tc005,
+    "TC006": _check_tc006,
+    "TC007": _check_tc007,
+    "TC008": _check_tc008,
+    "TC009": _check_tc009,
+    "TC010": _check_tc010,
+    "TC011": _check_tc011,
+    "TC012": _check_tc012,
 }

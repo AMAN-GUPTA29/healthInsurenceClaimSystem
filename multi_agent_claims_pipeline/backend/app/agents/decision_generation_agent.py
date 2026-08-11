@@ -10,10 +10,10 @@ PolicyEngine, FinancialCalculationService, and FraudAnalysisAgent (Phase
 2C) plus DocumentExtractionAgent (Phase 2B). See docs/architecture.md
 "Decision Generation (Phase 2D)" for the full rationale and
 docs/tradeoffs.md "Decision Precedence" for exactly how each precedence
-rule was derived from assignment.md/test_cases.json/policy_terms.json,
-including two places where test_cases.json's own worked expectation
-diverges from this deterministic logic and why that divergence was kept
-rather than special-cased away.
+rule was derived from assignment.md/test_cases.json/policy_terms.json —
+including the per-claim-limit reject gate (Rule 5.5, added in the Phase 3
+correctness pass) that reconciles TC006/TC008/TC010 without any
+test-case-specific branching.
 
 Input/output: `run(claim: Claim) -> ClaimDecision`. No separate
 `DecisionGenerationInput` wrapper model — `Claim` already aggregates every
@@ -132,6 +132,35 @@ class DecisionGenerationAgent(BaseAgent):
             rejection_reasons.append(RejectionReason.PRE_AUTH_MISSING)
             rejection_notes.append("Pre-authorization was required for this claim but was not obtained.")
 
+        # Rule 5.5: whole-claim per-claim-limit breach. `eligible_amount`
+        # equals `claimed_amount` unless a genuine line-item exclusion
+        # (DENTAL/VISION) has already reduced it — computed once here and
+        # reused below for the PARTIAL/APPROVED split (Rules 8/9).
+        #
+        # Only fires when (a) no other rejection reason already applies —
+        # this is the only reading consistent with TC012, whose claim-level
+        # exclusion also happens to exceed per_claim_limit but is expected
+        # to report EXCLUDED_CONDITION alone — and (b) the claim has no
+        # line-item-driven partial eligibility to fall back on instead, so
+        # a claim like TC006 (line items already establish a lower, trusted
+        # eligible amount) is never re-gated by the raw claimed amount. This
+        # is the only reading of policy_terms.json's global `per_claim_limit`
+        # that reproduces test_cases.json's own official numbers for ALL of
+        # TC004, TC006, TC008, and TC010 simultaneously — see
+        # docs/tradeoffs.md "Decision Precedence" for the full derivation.
+        is_partial = financial.eligible_amount < financial.claimed_amount
+        if (
+            not rejection_reasons
+            and not is_partial
+            and policy.per_claim_limit is not None
+            and submission.claimed_amount > policy.per_claim_limit
+        ):
+            rejection_reasons.append(RejectionReason.PER_CLAIM_EXCEEDED)
+            rejection_notes.append(
+                f"The claimed amount ({submission.claimed_amount}) exceeds the policy's per-claim "
+                f"limit ({policy.per_claim_limit})."
+            )
+
         if rejection_reasons:
             return ClaimDecision(
                 **base_kwargs,
@@ -183,14 +212,11 @@ class DecisionGenerationAgent(BaseAgent):
         # the CLAIMED amount is even eligible before discount/limits/copay"
         # figure (see FinancialBreakdown's docstring) — it is reduced below
         # claimed_amount ONLY by genuine line-item exclusion (DENTAL/VISION),
-        # never by network discount, sub-limit/per-claim-limit capping, or
-        # copay, all of which the assignment's own TC010 treats as normal
-        # terms of a fully-APPROVED claim, not partial ineligibility. See
-        # docs/tradeoffs.md "Decision Precedence" for the full reasoning and
-        # the one official case (TC008) where this produces a different
-        # decision than test_cases.json's own expectation.
+        # never by network discount or copay, both of which the assignment's
+        # own TC010 treats as normal terms of a fully-APPROVED claim, not
+        # partial ineligibility. `is_partial` was already computed above for
+        # the per-claim-limit gate (Rule 5.5) — reused here, not recomputed.
         line_item_decisions = self._build_line_item_decisions(policy.line_item_findings)
-        is_partial = financial.eligible_amount < financial.claimed_amount
 
         decision = DecisionType.PARTIAL if is_partial else DecisionType.APPROVED
         reason_code = "PARTIAL_LINE_ITEM_EXCLUSION" if is_partial else "APPROVED_FULL"

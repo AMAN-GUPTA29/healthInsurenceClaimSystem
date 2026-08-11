@@ -155,8 +155,10 @@ class PolicyEngine:
         hospital_name = _resolve_hospital_name(claim)
         is_network, network_finding = self._check_network(hospital_name)
         findings.append(network_finding)
-        if network_finding.status == PolicyRuleStatus.WARNING:
-            confidence = min(confidence, 0.6)
+        # Confidence impact deferred — see below, after exclusion/waiting-
+        # period/pre-auth/per-claim-limit are all known: an unresolvable
+        # hospital name only matters if network status could plausibly
+        # change the payable amount.
 
         wp_findings, waiting_period_applies, wp_confidence = self._check_waiting_periods(claim)
         findings.extend(wp_findings)
@@ -178,6 +180,35 @@ class PolicyEngine:
         line_item_findings = self._evaluate_line_items(claim, category, terms)
         if any(f.excluded for f in line_item_findings):
             exclusion_applies = True
+
+        # Phase 3 correctness fix: an unresolvable hospital name (the
+        # NETWORK_HOSPITAL WARNING) only degrades confidence when network
+        # status could plausibly change the payable amount — i.e. this
+        # category actually has a network discount, AND the claim isn't
+        # already headed for a claim-level rejection unrelated to money
+        # (a rejected claim never reaches a network-discount calculation
+        # at all). Mirrors DecisionGenerationAgent's own claim-level-
+        # rejection preconditions (Rules 2-5.5) so the two never disagree
+        # about what "irrelevant to the outcome" means. See TC012, whose
+        # own confidence_score expectation (above 0.90) is unreachable
+        # without this: an obesity-exclusion rejection has nothing to do
+        # with which hospital it happened at.
+        would_reject_regardless_of_network = (
+            (exclusion_applies and not line_item_findings)
+            or waiting_period_applies
+            or (requires_preauth and not preauth_provided)
+            or (
+                not line_item_findings
+                and self._policy_repository.per_claim_limit is not None
+                and submission.claimed_amount > self._policy_repository.per_claim_limit
+            )
+        )
+        if (
+            network_finding.status == PolicyRuleStatus.WARNING
+            and terms.network_discount_percent
+            and not would_reject_regardless_of_network
+        ):
+            confidence = min(confidence, 0.6)
 
         passed_rules = [f.rule for f in findings if f.status == PolicyRuleStatus.PASSED]
         failed_rules = [f.rule for f in findings if f.status == PolicyRuleStatus.FAILED]

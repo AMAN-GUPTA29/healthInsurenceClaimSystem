@@ -481,20 +481,20 @@ assumed the best case."
 
 ### Financial calculation ordering and the "never trust extracted amounts as authoritative" rule
 `FinancialCalculationService.calculate()` follows one fixed order:
-eligible amount → network discount → sub-limit cap → per-claim-limit cap →
-remaining annual-OPD-allowance cap → copay deduction → payable amount.
-Every step is logged into a human-readable `calculation_steps` list so the
-full chain is auditable without re-deriving it. `docs/tradeoffs.md`
-"Financial Calculation Order" documents the reasoning in full, including a
-disclosed, deliberate discrepancy against two of `test_cases.json`'s own
-worked examples (TC006, TC010) that arises from actually applying
-sub-limit/per-claim-limit caps as real caps, per the assignment's literal
-rule list, rather than reverse-engineering what looks like an omission in
-the test data's own reference calculation. An AI-extracted hospital-bill
-total is never substituted for the claimed/eligible amount — a mismatch
-beyond a small tolerance is recorded as a `warnings` entry naming both
-values (see "Bill Amount Reconciliation" in `docs/tradeoffs.md`), never
-silently "corrected."
+eligible amount → network discount → remaining annual-OPD-allowance cap →
+copay deduction → payable amount. `sub_limit` and `per_claim_limit` are
+surfaced on the result for transparency but are deliberately **not**
+applied as payable-amount caps (a Phase 3 correctness fix — see
+`docs/tradeoffs.md` "Phase 3 Correctness Pass": `test_cases.json`'s own
+official TC006/TC010 worked amounts both pay out the full discount/copay-
+adjusted figure despite exceeding these limits; `per_claim_limit` is
+instead a whole-claim REJECT gate evaluated by `DecisionGenerationAgent`,
+see below). Every step is logged into a human-readable `calculation_steps`
+list so the full chain is auditable without re-deriving it. An AI-extracted
+hospital-bill total is never substituted for the claimed/eligible amount —
+a mismatch beyond a small tolerance is recorded as a `warnings` entry
+naming both values (see "Bill Amount Reconciliation" in `docs/tradeoffs.md`),
+never silently "corrected."
 
 ### Fraud architecture — deterministic thresholds first, AI reserved but unused
 `FraudAnalysisAgent` reads four thresholds from `policy_terms.json`'s
@@ -594,18 +594,18 @@ fallback if anything about the call can't be trusted.
 derivation and worked numbers in `docs/tradeoffs.md` "Decision
 Precedence"): insufficient evidence → `MANUAL_REVIEW`; claim-level policy
 exclusion/waiting-period/pre-authorization-missing (collected together,
-not first-match-wins) → `REJECTED`; fraud-driven manual-review threshold
-→ `MANUAL_REVIEW`; zero payable → `REJECTED`; genuine line-item exclusion
+not first-match-wins) → `REJECTED`; a whole-claim per-claim-limit breach
+with no line-item-driven partial eligibility to fall back on (Rule 5.5,
+Phase 3) → `REJECTED`; fraud-driven manual-review threshold →
+`MANUAL_REVIEW`; zero payable → `REJECTED`; genuine line-item exclusion
 (DENTAL/VISION only) → `PARTIAL`; otherwise → `APPROVED`; low aggregate
 confidence even at that point → downgrade to `MANUAL_REVIEW` while still
-surfacing the reliable financial figure. Two of the twelve official test
-cases (TC006, TC010) already established in Phase 2C that a policy/
-category limit reduces the payable amount without rejecting the whole
-claim — Phase 2D's precedence is built to be consistent with that
-established behavior rather than special-cased per test case, which
-means one further official case (TC008) produces a different *decision*
-than `test_cases.json`'s own expectation, disclosed in `docs/eval-report.md`
-and `docs/tradeoffs.md` rather than silently patched around.
+surfacing the reliable financial figure. A Phase 3 audit resolved what was
+previously a disclosed discrepancy here: TC006/TC008/TC010 are now
+reproduced exactly (decision and amount) by reading `per_claim_limit` as a
+reject gate rather than a cap, and `sub_limit` as informational only — see
+`docs/tradeoffs.md` "Phase 3 Correctness Pass" and `docs/eval-report.md`
+for the resulting 12/12 official-case match.
 
 ### Financial ordering is unchanged — Decision Generation only reads the result
 
@@ -919,3 +919,77 @@ Pipeline Orchestrator (Phase 2)   TraceService.failed(component, exc)
 API Exception Handler (app/main.py)
     → Structured JSON error response
 ```
+
+---
+
+## Scaling to 10x Load
+
+Plum's own framing (75,000 claims/year today, a path to 10 million lives
+by 2030) is the explicit lens assignment.md asks this document to answer
+through. The per-phase "Scaling considerations" notes above cover each
+stage's own bottleneck; this section consolidates the answer end to end.
+
+**What would break first — sequential per-document AI calls.** Document
+Verification and Document Extraction each make one Gemini call per
+uploaded document, awaited in sequence (Known Issues 15/16). A 3-document
+claim today costs ~60-120s of wall-clock AI latency before a member sees
+a result. At 10x submission volume this is the first thing that would
+need to change — not because any single claim gets slower, but because
+throughput is bounded by how many of these sequential calls can be in
+flight at once. **Fix**: `asyncio.gather()` the per-document calls within
+a stage (they're already independent — no document's classification
+depends on another's), and consider a bounded worker pool / job queue
+(e.g. Celery/arq backed by Redis) so claim submission returns immediately
+with a "processing" status and the pipeline runs asynchronously, polled
+or pushed via websocket — a natural fit since `TraceService` already
+produces a structured, replayable event stream per claim.
+
+**Database — SQLite's single-writer limitation.** SQLite (Phase 0's
+deliberate 2-3-day-assignment choice, see `docs/tradeoffs.md`) serializes
+writes; at meaningfully concurrent claim volume this becomes the ceiling
+long before 10x. **Fix**: the `DATABASE_URL` env var already makes
+PostgreSQL a connection-string change, not a rewrite — every query goes
+through SQLAlchemy's async ORM, no raw SQLite-specific syntax anywhere in
+`app/repositories/`. Add connection pooling (`asyncpg` + SQLAlchemy's
+pool settings) and the `member_id`/`treatment_date` index
+`FraudAnalysisAgent`'s same-day/monthly counting queries would benefit
+from (noted but not needed at current scale — see "Fraud architecture"
+above).
+
+**Document storage — local disk doesn't scale horizontally.**
+`LocalFileDocumentStorage` (Phase 2A) writes under a local `data/uploads/`
+directory — fine for one process, but multiple API instances behind a
+load balancer would each have their own, inconsistent local disk.
+**Fix**: `DocumentStorage` is already an abstract interface
+(`app/storage/document_storage.py`) with exactly two methods
+(`save`/`read`) — an S3-backed implementation (Known Issue 14) is a new
+class behind the same interface, no change needed anywhere that calls it.
+
+**AI provider rate limits and cost.** 10x claim volume means 10x Gemini
+calls. `AIProvider` is already fully abstracted (Core Principle 2 — no
+agent imports a vendor SDK directly), so spreading load across providers,
+adding response caching for identical documents (unlikely but cheap to
+guard against), or negotiating a higher rate limit are all changes
+confined to `app/ai/providers/` and configuration, never the agents that
+call it.
+
+**Stateless API layer — already horizontally scalable.** FastAPI workers
+hold no in-process state between requests (every result is read from/
+written to the database via `ClaimRepository`); running N `uvicorn`
+workers behind a load balancer requires no code change, only
+infrastructure — the one prerequisite is the PostgreSQL migration above,
+since N SQLite-writing processes would corrupt each other.
+
+**Trace volume.** Every pipeline stage writes at least one `TraceEvent`
+row; at 10x claim volume this is 10x row volume, but each row is small,
+append-only, and never updated — a good fit for time-series partitioning
+or a dedicated event-store table (or, at genuinely large scale, an
+external log/observability system) if it ever became the actual
+bottleneck, which sequential AI calls (above) would hit first.
+
+**What would NOT need to change**: the deterministic Policy/Financial/
+Fraud/Decision layer (Phase 2C/2D) — pure Python computation over
+already-fetched data, negligible cost per claim regardless of volume; the
+multi-agent architecture itself, since each agent already has a single,
+narrow responsibility and no hidden cross-agent coupling to untangle
+under load.

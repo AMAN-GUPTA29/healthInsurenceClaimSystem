@@ -1,15 +1,19 @@
 #!/usr/bin/env python
 """
-Run assignment test cases through the real claims pipeline and print a
-PASS/FAIL report with the full trace for each case.
+Run all 12 official assignment test cases through the real claims
+pipeline and print a PASS/FAIL report with the full trace for each case.
 
 Usage (from the backend/ virtualenv):
     python ../scripts/run_eval.py
-    python ../scripts/run_eval.py TC001 TC002
+    python ../scripts/run_eval.py TC001 TC008
 
-Phase 2A only implements checkers for TC001-TC003; other case IDs will
-run but report "no checker implemented yet" rather than a fabricated
-PASS/FAIL.
+TC001-TC003 exercise early document-problem detection (Phase 2A).
+TC004-TC012 run the complete pipeline through to a final decision
+(Phase 2D), using each test case's own `content` blocks as a fixture
+extraction result in place of a real (SSL-blocked in this environment —
+see docs/AI_HANDOFF.md Known Issue 22) Gemini call — see
+app/evaluation/runner.py's module docstring and docs/eval-report.md
+"Methodology" for why this is equivalent for evaluation purposes.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 from app.evaluation.runner import EvalResult, run_test_cases  # noqa: E402
 
-DEFAULT_CASE_IDS = ["TC001", "TC002", "TC003"]
+DEFAULT_CASE_IDS = [f"TC{n:03d}" for n in range(1, 13)]
 
 
 def _print_result(result: EvalResult) -> None:

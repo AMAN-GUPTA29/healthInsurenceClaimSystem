@@ -663,14 +663,49 @@ class TestDecisionReachesPartialForLineItemExclusion:
 
         assert result.status == ClaimStatus.DECIDED
         assert result.decision.decision == DecisionType.PARTIAL
-        # NOT 8000 (the eligible non-excluded amount): the global
-        # per_claim_limit (Rs.5000) is applied as a real cap in this
-        # implementation, same disclosed Decision-35 discrepancy already
-        # documented for TC006 in docs/tradeoffs.md — the DECISION here
-        # (PARTIAL) matches the assignment's own expectation even though
-        # the exact amount does not.
-        assert result.decision.approved_amount == _Decimal("5000.00")
+        # 8000, the eligible non-excluded amount, matching test_cases.json's
+        # own official expected TC006 approved_amount exactly. The global
+        # per_claim_limit (Rs.5000) is NOT re-applied here — line-item
+        # exclusion already establishes a trusted, lower eligible amount
+        # (Phase 3 correctness fix; see docs/tradeoffs.md "Decision
+        # Precedence").
+        assert result.decision.approved_amount == _Decimal("8000.00")
         assert len(result.decision.line_item_decisions) == 2
+
+
+class TestDecisionReachesRejectedForPerClaimLimit:
+    """TC008-shaped: a CONSULTATION claim with no itemized line items and a
+    claimed amount (7500) exceeding the global per_claim_limit (5000) must
+    be REJECTED outright, not capped to a partial payable amount — the
+    Phase 3 correctness fix. See docs/tradeoffs.md "Decision Precedence"."""
+
+    @pytest.mark.anyio
+    async def test_consultation_claim_over_per_claim_limit_is_rejected(self, policy_repository):
+        claim = make_claim(
+            member_id="EMP003",
+            claimed_amount=_Decimal("7500"),
+            documents=[
+                DocumentMetadata(file_id="F015", file_name="rx.jpg"),
+                DocumentMetadata(file_id="F016", file_name="bill.jpg"),
+            ],
+        )
+        classifications = {
+            "F015": DocumentClassification(
+                file_id="F015", document_type="PRESCRIPTION", patient_name="Amit Verma", confidence=1.0
+            ),
+            "F016": DocumentClassification(
+                file_id="F016", document_type="HOSPITAL_BILL", patient_name="Amit Verma", confidence=1.0
+            ),
+        }
+        pipeline = build_full_pipeline(policy_repository)
+        tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
+
+        result = await pipeline.run(claim, classifications=classifications, tracer=tracer)
+
+        assert result.status == ClaimStatus.DECIDED
+        assert result.decision.decision == DecisionType.REJECTED
+        assert result.decision.approved_amount == _Decimal("0")
+        assert "PER_CLAIM_EXCEEDED" in [r.value for r in result.decision.rejection_reasons]
 
 
 class TestDecisionReachesRejectedForWaitingPeriod:
