@@ -38,7 +38,6 @@ env/
 ENV/
 env.bak/
 venv.bak/
-.python-version
 
 # ── Testing / Coverage ──────────────────────────────────────────────────────
 .pytest_cache/

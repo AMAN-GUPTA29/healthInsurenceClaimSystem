@@ -7,7 +7,8 @@ python-multipart==0.0.32  # required for FastAPI Form()/File() (real document up
 
 # ── Database ──────────────────────────────────────────────────────────────────
 sqlalchemy==2.0.36
-aiosqlite==0.20.0
+aiosqlite==0.20.0  # SQLite driver — local dev / tests
+asyncpg==0.30.0  # PostgreSQL driver — production (DATABASE_URL=postgresql+asyncpg://...)
 greenlet==3.5.5  # SQLAlchemy async engine dependency; not always auto-installed transitively
 
 # ── AI Provider ───────────────────────────────────────────────────────────────
