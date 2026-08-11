@@ -165,11 +165,4 @@ describe('ClaimSubmission', () => {
     expect(mockNavigate).not.toHaveBeenCalled()
   })
 
-  it('loading a TC001 example prefills matching claim metadata', async () => {
-    renderPage()
-    await userEvent.click(screen.getByRole('button', { name: /TC001 metadata/i }))
-
-    expect(screen.getByDisplayValue('EMP001')).toBeInTheDocument()
-    expect(screen.getByDisplayValue('1500')).toBeInTheDocument()
-  })
 })

@@ -76,37 +76,6 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-// ── Example metadata (for demo / manual TC001-3 reproduction with real files) ─
-//
-// Only claim metadata is pre-filled — matching TC001-3's member/category/
-// date/amount. The member must still attach real documents; there is no
-// "load fixture documents" concept left in the real-upload UI (see
-// docs/AI_HANDOFF.md for the Phase 2A correction rationale).
-
-const EXAMPLES = {
-  TC001: {
-    label: 'TC001 metadata — Wrong Document',
-    member_id: 'EMP001',
-    claim_category: 'CONSULTATION' as ClaimCategory,
-    treatment_date: '2024-11-01',
-    claimed_amount: '1500',
-  },
-  TC002: {
-    label: 'TC002 metadata — Unreadable Document',
-    member_id: 'EMP004',
-    claim_category: 'PHARMACY' as ClaimCategory,
-    treatment_date: '2024-10-25',
-    claimed_amount: '800',
-  },
-  TC003: {
-    label: 'TC003 metadata — Different Patients',
-    member_id: 'EMP001',
-    claim_category: 'CONSULTATION' as ClaimCategory,
-    treatment_date: '2024-11-01',
-    claimed_amount: '1500',
-  },
-} as const
-
 export function ClaimSubmission() {
   const navigate = useNavigate()
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -119,14 +88,6 @@ export function ClaimSubmission() {
   const [fileError, setFileError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  function loadExample(key: keyof typeof EXAMPLES) {
-    const ex = EXAMPLES[key]
-    setMemberId(ex.member_id)
-    setCategory(ex.claim_category)
-    setTreatmentDate(ex.treatment_date)
-    setClaimedAmount(ex.claimed_amount)
-  }
 
   function handleFilesSelected(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return
@@ -189,7 +150,7 @@ export function ClaimSubmission() {
   }
 
   return (
-    <div style={{ padding: '40px 0', maxWidth: '820px' }}>
+    <div style={{ padding: '40px 0' }}>
       <div style={{ marginBottom: '32px' }}>
         <h1 style={{ margin: '0 0 6px', fontSize: '24px', fontWeight: 700, color: '#f1f5f9' }}>
           Submit a Claim
@@ -203,34 +164,12 @@ export function ClaimSubmission() {
         </p>
       </div>
 
-      <div style={{ display: 'flex', gap: '8px', marginBottom: '24px', flexWrap: 'wrap' }}>
-        {(Object.keys(EXAMPLES) as (keyof typeof EXAMPLES)[]).map(key => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => loadExample(key)}
-            style={{
-              background: 'rgba(99, 102, 241, 0.12)',
-              border: '1px solid rgba(99, 102, 241, 0.3)',
-              borderRadius: '8px',
-              color: '#a5b4fc',
-              padding: '6px 12px',
-              fontSize: '12px',
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
-          >
-            {EXAMPLES[key].label}
-          </button>
-        ))}
-      </div>
-
       <form onSubmit={handleSubmit}>
         <div style={{ ...CARD, marginBottom: '20px' }}>
           <h2 style={{ margin: '0 0 20px', fontSize: '15px', fontWeight: 600, color: '#e2e8f0' }}>
             Claim Details
           </h2>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '16px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '16px', marginBottom: '16px' }}>
             <div>
               <label style={LABEL}>Member ID</label>
               <input style={INPUT} value={memberId} onChange={e => setMemberId(e.target.value)} required />
@@ -240,7 +179,7 @@ export function ClaimSubmission() {
               <input style={INPUT} value={policyId} onChange={e => setPolicyId(e.target.value)} required />
             </div>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
             <div>
               <label style={LABEL}>Claim Category</label>
               <select style={INPUT} value={category} onChange={e => setCategory(e.target.value as ClaimCategory)}>
