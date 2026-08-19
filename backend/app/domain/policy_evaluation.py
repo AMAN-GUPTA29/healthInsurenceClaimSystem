@@ -5,8 +5,8 @@ Answers "what does the policy say about this claim?" — deterministically,
 from policy_terms.json via PolicyRepository/CategoryTerms. Never decides a
 payable amount (FinancialCalculationService's job) and never decides
 APPROVED/PARTIAL/REJECTED/MANUAL_REVIEW (DecisionGenerationAgent's job,
-Phase 2D). See docs/architecture.md "Policy Evaluation (Phase 2C)" for the
-full architectural rationale.
+Phase 2D). See ARCHITECTURE.docx "7. Policy, Financial & Fraud Logic" for
+the full architectural rationale.
 
 Rules (same as the rest of app/domain/):
 - Pure Pydantic models. No database imports. No FastAPI imports. No AI SDK imports.

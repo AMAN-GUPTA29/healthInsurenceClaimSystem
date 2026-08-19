@@ -4,14 +4,13 @@ Shared building blocks for the six document-extraction prompt modules
 
 Kept separate so the extraction rules that must apply to every document
 type (never hallucinate, preserve uncertainty, ...) are defined once, while
-each per-document-type module stays independently editable/versionable —
-see docs/AI_HANDOFF.md Phase 2B "Modular Prompts".
+each per-document-type module stays independently editable/versionable.
 
 Schema design note: every schema built on top of `EXTRACTION_BASE_SCHEMA`
 avoids `null`/nullable unions and `$ref`/`oneOf`/`allOf` — Gemini's
-`response_schema` only accepts an OpenAPI-3.0-like subset (see Decision 8
-in docs/AI_HANDOFF.md). "Not visible" is represented with an explicit
-sentinel instead: "" for strings/dates/amounts, [] for lists, "UNCLEAR" for
+`response_schema` only accepts an OpenAPI-3.0-like subset. "Not visible" is
+represented with an explicit sentinel instead: "" for strings/dates/
+amounts, [] for lists, "UNCLEAR" for
 the tri-state yes/no/unclear fields. app/domain/extraction.py's validators
 convert these sentinels into real None/Decimal/bool values — the AI-facing
 shape and the domain shape are deliberately different.

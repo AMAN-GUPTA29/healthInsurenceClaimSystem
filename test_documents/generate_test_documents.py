@@ -973,7 +973,7 @@ def gen_extra() -> None:
         "EXTRA09_hospital_bill_herniation.pdf",
         document_type="PRESCRIPTION + HOSPITAL_BILL", patient="Suresh Patil",
         purpose="Isolated regression check for the PolicyEngine word-boundary fix (docs/tradeoffs.md "
-                "'Diagnosis/Exclusion Normalization', AI_HANDOFF.md Decision 34): diagnosis text "
+                "'Diagnosis/Exclusion Normalization'): diagnosis text "
                 "contains 'Herniation' but never the standalone word 'Hernia'. Deliberately simpler "
                 "than TC007 (plain CONSULTATION, no MRI/pre-auth) to isolate JUST the text-matching "
                 "behavior from TC007's other policy findings.",

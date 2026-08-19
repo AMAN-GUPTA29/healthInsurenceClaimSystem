@@ -116,7 +116,7 @@ than assuming it is GOOD quality.
 Never invent a patient name — return an empty string if none is evident."""
 
 # Gemini's response_schema accepts an OpenAPI-3.0-like subset, not full JSON
-# Schema (see docs/AI_HANDOFF.md Decision 8) — avoid nullable/union types
+# Schema — avoid nullable/union types
 # here (e.g. ["string","null"]) so the same schema works unmodified against
 # both the Gemini and Anthropic adapters. patient_name uses "" for "none
 # found" rather than null for this reason.

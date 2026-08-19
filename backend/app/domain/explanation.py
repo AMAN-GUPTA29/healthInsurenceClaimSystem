@@ -6,7 +6,7 @@ supporting evidence (Policy/Financial/Fraud/Extraction results — all
 already computed deterministically by earlier stages) into a structured,
 member- and operations-facing explanation. It never introduces new facts,
 never recalculates anything, and never overrides the decision — see
-docs/architecture.md "Explanation (Phase 2D)" for the full rationale.
+ARCHITECTURE.docx "8. Decision & Explanation" for the full rationale.
 
 Rules (same as the rest of app/domain/):
 - Pure Pydantic models. No database imports. No FastAPI imports. No AI SDK imports.

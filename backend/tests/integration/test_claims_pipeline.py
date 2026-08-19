@@ -175,8 +175,7 @@ class TestCrossDocumentMemberIdentityMismatch:
     EMP001 resolves to Rajesh Kumar (policy_terms.json). Before the fix,
     two documents that agreed with *each other* (both "Vikram Joshi")
     incorrectly PASSED, since CrossDocumentValidationAgent never compared
-    against the claim's actual member. See docs/AI_HANDOFF.md "Phase 2A
-    identity-validation gap fixed".
+    against the claim's actual member.
     """
 
     @pytest.mark.anyio
@@ -613,11 +612,11 @@ class TestPolicyEngineFailureDegradesGracefully:
 #
 # These reuse build_full_pipeline() (real PolicyEngine/FinancialCalculation
 # Service/FraudAnalysisAgent/DecisionGenerationAgent, ExplanationAgent with
-# no AI provider) — extraction is never configured in this file (Decision
-# 30's backward-compat "skip, don't clobber"), so a test that needs
+# no AI provider) — extraction is never configured in this file (a
+# deliberate backward-compat "skip, don't clobber"), so a test that needs
 # PolicyEngine to see a diagnosis/line-items pre-populates
 # `claim.extraction_result` directly before calling `pipeline.run()`,
-# exactly like docs/AI_HANDOFF.md's fixture-based Phase 2C verification did.
+# the same fixture-based approach the Phase 2C verification used.
 
 from datetime import date as _date  # noqa: E402
 from decimal import Decimal as _Decimal  # noqa: E402

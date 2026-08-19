@@ -52,7 +52,7 @@ class ClaimORM(Base):
     # Phase 2C: all three are claim-level (not per-document) results, same
     # granularity as validation/document-verification/cross-document above
     # — a single JSON blob each, read as a whole with the claim, never
-    # queried field-by-field. See docs/component-contracts.md.
+    # queried field-by-field. See COMPONENT_CONTRACTS.docx "13. Repositories / Database".
     policy_evaluation_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     financial_calculation_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     fraud_analysis_result_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
@@ -94,7 +94,7 @@ class ClaimDocumentORM(Base):
 
     # ── Phase 2B: document extraction ───────────────────────────────────────
     #
-    # Hybrid persistence per docs/component-contracts.md "DocumentExtractionAgent":
+    # Hybrid persistence per COMPONENT_CONTRACTS.docx "6. Document Extraction":
     # a handful of genuinely queryable fields as real columns (diagnosis,
     # treatment, document_date, doctor_name, total_amount — the fields most
     # likely to matter to a future SQL query or PolicyEngine lookup) plus

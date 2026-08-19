@@ -4,9 +4,9 @@ Source-file path resolution.
 The assignment's source-of-truth files (policy_terms.json, test_cases.json,
 sample_documents_guide.md, assignment.md) live at the repository root —
 one level *above* multi_agent_claims_pipeline/ — not inside the project
-directory as the originally documented tree assumed (see docs/AI_HANDOFF.md,
-Phase 2A notes). A plain relative path resolves against the process's CWD,
-which differs depending on whether uvicorn/pytest is launched from
+directory as the originally documented tree assumed. A plain relative
+path resolves against the process's CWD, which differs depending on
+whether uvicorn/pytest is launched from
 backend/ or the project root, and neither matches the actual file location.
 
 `resolve_source_file` checks, in order: the path as given (CWD-relative,

@@ -6,14 +6,14 @@ Answers a narrower question than DocumentVerificationAgent: not "is this
 the correct document and is it usable?" (Phase 2A) but "what information is
 actually contained in this document?". Kept as a separate agent so
 DocumentVerificationAgent never grows into a general extraction agent — see
-docs/architecture.md "Document Extraction" for the full rationale.
+COMPONENT_CONTRACTS.docx "6. Document Extraction" for the full rationale.
 
 Always uses real AI calls (AIProvider.analyze_document, the same
 multimodal capability DocumentVerificationAgent uses for real uploads) —
 there is deliberately no fixture/text-only extraction path the way
-DocumentVerificationAgent has one for evaluation fixtures (Decision 17 in
-docs/AI_HANDOFF.md). A document with no stored bytes cannot be extracted at
-all and is recorded as a per-document failure, not silently skipped as if
+DocumentVerificationAgent has one for evaluation fixtures. A document with
+no stored bytes cannot be extracted at all and is recorded as a
+per-document failure, not silently skipped as if
 it succeeded. Fixtures/mocks are only used at the AIProvider boundary in
 automated unit tests, per the Phase 2B brief.
 

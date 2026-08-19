@@ -317,7 +317,7 @@ class FinancialBreakdown(BaseModel):
     """
     Deterministic financial calculation — output of
     FinancialCalculationService (Phase 2C). Every amount is Decimal, never
-    float (see docs/AI_HANDOFF.md invariant #3). This is a Phase 0
+    float. This is a Phase 0
     placeholder that went unused until Phase 2C filled it in; `payable_amount`
     was named `approved_amount` at definition time but was never read or
     written anywhere — renamed for Phase 2C since "approved" implies a
@@ -326,7 +326,7 @@ class FinancialBreakdown(BaseModel):
     mathematically payable under the applicable policy rules, calculated
     as if approved." See docs/tradeoffs.md "Financial Calculation Order"
     for why discount -> limits -> copay was chosen, and
-    docs/component-contracts.md for the full contract.
+    COMPONENT_CONTRACTS.docx "8. Financial Calculation" for the full contract.
     """
 
     claimed_amount: Decimal
@@ -380,7 +380,7 @@ class ClaimDecision(BaseModel):
     the two agents that populate this model; every other field already
     existed here since Phase 0 and is reused as-is (Phase 2D deliberately
     does not introduce a parallel decision-result shape — see
-    docs/component-contracts.md "DecisionGenerationAgent").
+    COMPONENT_CONTRACTS.docx "10. Decision Generation").
     """
 
     claim_id: str
@@ -399,7 +399,7 @@ class ClaimDecision(BaseModel):
         default=None,
         description="Short machine-readable code for the decision path taken, e.g. "
         "'REJECTED_WAITING_PERIOD', 'MANUAL_REVIEW_FRAUD' — see DecisionGenerationAgent's "
-        "reason-code vocabulary in docs/component-contracts.md. Distinct from `explanation` "
+        "reason-code vocabulary in COMPONENT_CONTRACTS.docx '10. Decision Generation'. Distinct from `explanation` "
         "(free-form) and `rejection_reasons` (the closed RejectionReason enum list).",
     )
 

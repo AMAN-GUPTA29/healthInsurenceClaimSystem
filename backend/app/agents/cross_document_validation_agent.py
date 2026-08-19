@@ -12,8 +12,7 @@ Purely deterministic: it compares patient names DocumentVerificationAgent
 the `Member` `ClaimValidationAgent` already resolved. It never calls AI
 itself and never re-reads a document.
 
-Identity-fix background (see docs/AI_HANDOFF.md "Phase 2A identity-
-validation gap fixed" for the full account): before this fix, two
+Identity-fix background: before this fix, two
 documents that agreed with *each other* always passed, even if neither
 belonged to the claim's actual member — e.g. member EMP001 (Rajesh Kumar)
 submitting two documents both for "Vikram Joshi" would incorrectly PASS,
@@ -27,7 +26,7 @@ performs both:
 Both outcomes deliberately still return a structured
 `CrossDocumentValidationResult(status=BLOCKED)`, never raise
 `DocumentPatientMismatchError` (app/domain/errors.py) — consistent with
-the existing (a) check and with Decision 19 in docs/AI_HANDOFF.md: a
+the existing (a) check: a
 correctly-detected "blocked" verdict is the agent succeeding at its job,
 not a failure, so it must stay a return value, not an exception. Raising
 here would incorrectly route through ClaimsPipeline's FAILED/degrade path
@@ -50,7 +49,8 @@ from app.domain.verification import (
 
 def _normalize_name(name: str) -> str:
     """Case/whitespace-insensitive comparison key. Not fuzzy matching —
-    see docs/component-contracts.md for why that's a documented limitation.
+    a deliberate, documented limitation (see docs/tradeoffs.md "Network
+    Hospital Matching" for the shared reasoning against fuzzy matching).
     Used for both document<->document and (identity fix) document<->member
     comparisons, so "Rajesh Kumar" / "rajesh kumar" / " Rajesh Kumar " are
     all the same identity in both checks."""

@@ -4,7 +4,7 @@ Unit tests for DocumentExtractionAgent.
 Uses fake AIProvider/DocumentStorage doubles (no vendor SDK, no real
 filesystem I/O) — same convention as
 tests/unit/test_document_verification_agent.py. Real-Gemini verification is
-manual (see docs/AI_HANDOFF.md Phase 2B "Real AI Verification").
+manual.
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@ PolicyEngine — Phase 2C, pipeline stage 5.
 
 The DETERMINISTIC authority on all policy rules. Loads nothing itself —
 reads everything through the injected PolicyRepository (policy_terms.json,
-never hardcoded — see docs/AI_HANDOFF.md invariant #2).
+never hardcoded).
 
 Rules:
 - The LLM is NEVER the final authority on policy decisions. PolicyEngine
@@ -12,10 +12,11 @@ Rules:
   (Phase 2B) already extracted.
 - Answers "what does the policy say?" — never "how much is payable?"
   (FinancialCalculationService) and never "is this claim approved?"
-  (DecisionGenerationAgent, Phase 2D). See docs/architecture.md "Policy
-  Evaluation (Phase 2C)" for the full three-way separation.
+  (DecisionGenerationAgent, Phase 2D). See ARCHITECTURE.docx "7. Policy,
+  Financial & Fraud Logic" for the full three-way separation.
 - Every check produces a structured, explainable PolicyRuleFinding —
-  never a giant free-form paragraph. See docs/component-contracts.md.
+  never a giant free-form paragraph. See COMPONENT_CONTRACTS.docx
+  "7. Policy Engine".
 """
 
 from __future__ import annotations
@@ -280,11 +281,9 @@ class PolicyEngine:
         policy_terms.json. Note: every assignment fixture is dated 2024,
         evaluated against a real system clock years later, so this will
         legitimately report FAILED for all of them — an honest finding,
-        not a bug (see docs/AI_HANDOFF.md Decision 15 for the earlier,
-        narrower version of this same observation, and Phase 2C's own
-        notes for why implementing it now is safe: unlike Phase 2A's
-        validation stages, PolicyEngine's findings don't halt the
-        pipeline — Phase 2D decides what a failed deadline means).
+        not a bug: unlike Phase 2A's validation stages, PolicyEngine's
+        findings don't halt the pipeline — Phase 2D decides what a
+        failed deadline means.
         """
         deadline_days = self._policy_repository.submission_deadline_days
         elapsed_days = (submitted_at.date() - treatment_date).days

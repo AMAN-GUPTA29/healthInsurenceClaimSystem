@@ -8,7 +8,7 @@ is overridden with a fake double (no vendor SDK, no network) via FastAPI's
 dependency_overrides, matching this project's existing philosophy: never
 depend on a real network call in the automated test suite (see
 tests/unit/test_document_verification_agent.py). Real-AI verification is
-done manually/live — see docs/AI_HANDOFF.md.
+done manually/live.
 """
 
 from __future__ import annotations
@@ -330,8 +330,7 @@ async def test_submit_claim_tc003_different_patients_detected(client_factory):
 @pytest.mark.anyio
 async def test_submit_claim_member_identity_mismatch_blocks(client_factory):
     """
-    Phase 2A identity-validation gap fix, HTTP-level regression — see
-    docs/AI_HANDOFF.md 'Phase 2A identity-validation gap fixed'. EMP001
+    Phase 2A identity-validation gap fix, HTTP-level regression. EMP001
     resolves to Rajesh Kumar; both uploaded documents are internally
     consistent with each other (both "Vikram Joshi") but belong to neither
     the member nor each other's expected identity. Before the fix this
@@ -371,7 +370,7 @@ async def test_submit_claim_member_identity_mismatch_blocks(client_factory):
     assert result["fraud_analysis_result"] is None
     # Phase 2D: a BLOCKED claim never gets a fake decision — processing
     # status = BLOCKED, final decision = null, per the explicit distinction
-    # required for early-stop cases (see docs/architecture.md).
+    # required for early-stop cases (see ARCHITECTURE.docx).
     assert result["decision"] is None
 
     claim_id = result["claim_id"]
@@ -482,9 +481,8 @@ async def test_submit_claim_multiple_documents_and_metadata(client_factory):
 @pytest.mark.anyio
 async def test_extraction_result_survives_a_database_round_trip(client_factory):
     """
-    Regression guard for restart persistence (docs/AI_HANDOFF.md Phase 2B
-    "Restart Persistence"): POST's response is built from the in-memory
-    Claim the pipeline just produced, which would pass even if
+    Regression guard for restart persistence: POST's response is built
+    from the in-memory Claim the pipeline just produced, which would pass even if
     ClaimRepository never persisted extraction correctly. A separate GET —
     a fresh ClaimRepository.get_by_id() call, exercising
     _extraction_result_from_rows' rehydration from
@@ -912,3 +910,50 @@ async def test_submit_claim_decided_persists_with_fk_enforcement_on(client_facto
     fetched = await client.get(f"/api/v1/claims/{result['claim_id']}")
     assert fetched.status_code == 200
     assert len(fetched.json()["documents"]) == 2
+
+
+@pytest.mark.anyio
+async def test_submit_claim_blocked_documents_reference_existing_claim_row(client_factory_fk_enforced):
+    """
+    Direct database-state check, not just an API-level round trip: queries
+    `claims` and `claim_documents` with raw SQL after a BLOCKED submission
+    and asserts (a) the parent row exists, (b) its document rows exist, and
+    (c) every claim_documents.claim_id resolves to an existing claims row
+    (a LEFT JOIN orphan-check — the literal condition PostgreSQL's FK
+    constraint enforces). This is the most direct possible proof that the
+    parent-before-child ordering actually holds in the database, not just
+    that the API didn't return a 500.
+    """
+    from sqlalchemy import text
+    import app.repositories.database as dbmod
+
+    data, files, ai_responses = tc001_form()
+    client = await client_factory_fk_enforced(ai_responses)
+    response = await client.post("/api/v1/claims", data=data, files=files)
+    assert response.status_code == 201
+    claim_id = response.json()["claim_id"]
+
+    async with dbmod._engine.connect() as conn:
+        claim_rows = (
+            await conn.execute(text("SELECT claim_id FROM claims WHERE claim_id = :cid"), {"cid": claim_id})
+        ).fetchall()
+        assert len(claim_rows) == 1, f"parent claim row missing for {claim_id}"
+
+        doc_rows = (
+            await conn.execute(
+                text("SELECT id, claim_id FROM claim_documents WHERE claim_id = :cid"), {"cid": claim_id}
+            )
+        ).fetchall()
+        assert len(doc_rows) == 2, f"expected 2 claim_documents rows, found {len(doc_rows)}"
+
+        orphans = (
+            await conn.execute(
+                text(
+                    "SELECT claim_documents.id FROM claim_documents "
+                    "LEFT JOIN claims ON claim_documents.claim_id = claims.claim_id "
+                    "WHERE claims.claim_id IS NULL AND claim_documents.claim_id = :cid"
+                ),
+                {"cid": claim_id},
+            )
+        ).fetchall()
+        assert orphans == [], f"found claim_documents rows with no matching parent claim: {orphans}"

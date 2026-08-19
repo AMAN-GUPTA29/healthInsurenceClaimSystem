@@ -4,8 +4,7 @@ Unit tests for ExplanationAgent — Phase 2D.
 Uses a fake AIProvider double (no vendor SDK — same pattern as
 test_document_verification_agent.py's _FakeAIProvider) so these tests
 never touch the network. The real integration path (a genuine configured
-provider) is exercised manually — see docs/AI_HANDOFF.md "Verification
-(Phase 2D)".
+provider) is exercised manually.
 """
 
 from __future__ import annotations

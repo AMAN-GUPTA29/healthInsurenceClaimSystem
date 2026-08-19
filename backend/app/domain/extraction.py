@@ -7,8 +7,7 @@ but "what information does this specific document actually contain?".
 
 Rules (same as the rest of app/domain/):
 - Pure Pydantic models. No database imports. No FastAPI imports. No AI SDK imports.
-- All monetary amounts are Decimal — never float (see docs/AI_HANDOFF.md
-  "Things Future Agents Must NOT Break" #3).
+- All monetary amounts are Decimal — never float.
 - Every field the AI could not find is None (or an empty list), never a
   guessed value — the AI-facing schemas in app/ai/prompts/*_extraction.py
   use explicit sentinel values ("" / [] ) for "not visible", which the
@@ -32,8 +31,8 @@ from app.domain.trace import AITraceMetadata
 #
 # The AI-facing JSON schemas (app/ai/prompts/*_extraction.py) never use
 # `null` — Gemini's response_schema is an OpenAPI-3.0-like subset that
-# doesn't reliably support nullable unions (see docs/AI_HANDOFF.md Decision
-# 8), so every "not visible" value comes back as a sentinel: "" for strings/
+# doesn't reliably support nullable unions, so every "not visible" value
+# comes back as a sentinel: "" for strings/
 # dates/amounts, [] for lists, and the literal string "UNCLEAR" for the
 # tri-state signature/stamp/abnormal-flag fields. These validators translate
 # those sentinels into real None/Decimal/bool values for the domain layer —
@@ -123,8 +122,8 @@ class EvidenceItem(BaseModel):
     """A short verbatim quote supporting one extracted field — kept for a
     handful of clinically/financially important fields only (diagnosis,
     treatment, total amount, ...), not every field. See
-    docs/architecture.md "Document Extraction" for why this is a bounded
-    list rather than a {value, evidence} wrapper on every field."""
+    COMPONENT_CONTRACTS.docx "6. Document Extraction" for why this is a
+    bounded list rather than a {value, evidence} wrapper on every field."""
 
     field: str
     quote: str
@@ -389,8 +388,9 @@ class DocumentExtractionFailure(BaseModel):
     """
     Recorded when one document's extraction could not be completed. The
     claim and every other document must still proceed — see
-    DocumentExtractionAgent's docstring and docs/architecture.md "Document
-    Extraction" for why this is deliberately per-document, not per-claim.
+    DocumentExtractionAgent's docstring and COMPONENT_CONTRACTS.docx
+    "6. Document Extraction" for why this is deliberately per-document,
+    not per-claim.
     """
 
     file_id: str

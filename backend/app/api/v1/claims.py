@@ -34,7 +34,7 @@ Generation) — see `claim.decision` on the response. A claim that stops
 early (wrong/missing/unreadable document, patient mismatch, unknown
 member) comes back with `status=BLOCKED`/`DOCUMENTS_PENDING` and
 `decision=null`, per its own specific `user_message` — see
-docs/architecture.md "Claim Processing Flow".
+ARCHITECTURE.docx "3. How a Claim Flows Through the System".
 """
 
 from __future__ import annotations

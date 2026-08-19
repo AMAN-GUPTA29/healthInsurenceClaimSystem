@@ -7,8 +7,8 @@ arithmetic only. No AI calls. Never decides APPROVED/PARTIAL/REJECTED/
 MANUAL_REVIEW (DecisionGenerationAgent, Phase 2D) — a capped/reduced
 payable_amount here is "what would be payable if approved," not itself an
 approval. See docs/tradeoffs.md "Financial Calculation Order" for the
-calculation-order rationale and docs/architecture.md "Financial
-Calculation (Phase 2C)" for the full design rationale.
+calculation-order rationale and COMPONENT_CONTRACTS.docx
+"8. Financial Calculation" for the full design rationale.
 
 `sub_limit` and `per_claim_limit` are surfaced on `FinancialBreakdown` for
 transparency but are deliberately NOT applied as payable-amount caps here

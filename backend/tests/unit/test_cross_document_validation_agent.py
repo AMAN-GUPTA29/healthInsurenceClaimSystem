@@ -130,8 +130,7 @@ class TestOmittedMemberIsFullyBackwardCompatible:
 
 
 class TestDocumentMemberIdentityMismatch:
-    """Phase 2A identity-validation gap fix — see docs/AI_HANDOFF.md
-    'Phase 2A identity-validation gap fixed'. Regression cases A-E as
+    """Phase 2A identity-validation gap fix. Regression cases A-E as
     specified: same wrong person, correct member, mixed identities,
     case/whitespace normalization, and the pre-existing doc-to-doc
     mismatch (must not regress)."""

@@ -9,7 +9,7 @@ the Phase 0 database foundation.
 Deliberately not shaped as BaseRepository[T, ID]: trace events are a
 one-claim-to-many-events relationship, not single-entity CRUD-by-id, so
 forcing the generic get_by_id/save/delete shape would fit poorly. See
-docs/component-contracts.md for the rationale.
+COMPONENT_CONTRACTS.docx "14. Trace Service" for the rationale.
 """
 
 from __future__ import annotations

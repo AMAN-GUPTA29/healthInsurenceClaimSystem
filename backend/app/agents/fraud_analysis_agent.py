@@ -13,8 +13,7 @@ AI-assisted signal as an *optional* addition, but every threshold this
 phase needs (same-day/monthly claim counts, high-value, auto-manual-review)
 is explicitly numeric and policy-defined, so a deterministic-only
 implementation is both sufficient and the more conservative, more
-explainable choice. See docs/AI_HANDOFF.md "Phase 2C" for the full
-rationale on why this phase doesn't add a third AI-calling component.
+explainable choice.
 If an AI-assisted signal is added later, `FraudAnalysisResult.ai_risk_score`
 is the reserved, deliberately-separate field for it (see
 app/domain/fraud.py) — it must never be merged into

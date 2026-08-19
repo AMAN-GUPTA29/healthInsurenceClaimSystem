@@ -23,8 +23,9 @@ the report and how it's tracked.
 These tests lock in that the corrected prompt actually contains the
 generic structural guidance needed to prevent both of these — they cannot
 prove a live model will always classify correctly (no live LLM call is
-made here — see the manual/live verification notes in docs/AI_HANDOFF.md
-for that), but they do prevent a future edit from silently stripping the
+made here — see docs/tradeoffs.md "Document Classification — Structure/
+Issuer Over Specialty or Test-Type" for the manual/live verification
+notes), but they do prevent a future edit from silently stripping the
 guidance back out. No test-case ID, member ID, or fixture file name
 appears anywhere in this file or in the prompt itself — the guidance is
 expressed purely in terms of generic document structure.

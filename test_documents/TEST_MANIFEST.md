@@ -545,7 +545,7 @@ See `README.md` in this directory for how to actually run each case through the 
 
 - **Document type:** PRESCRIPTION + HOSPITAL_BILL
 - **Patient:** Suresh Patil
-- **Purpose:** Isolated regression check for the PolicyEngine word-boundary fix (docs/tradeoffs.md 'Diagnosis/Exclusion Normalization', AI_HANDOFF.md Decision 34): diagnosis text contains 'Herniation' but never the standalone word 'Hernia'. Deliberately simpler than TC007 (plain CONSULTATION, no MRI/pre-auth) to isolate JUST the text-matching behavior from TC007's other policy findings.
+- **Purpose:** Isolated regression check for the PolicyEngine word-boundary fix (docs/tradeoffs.md 'Diagnosis/Exclusion Normalization'): diagnosis text contains 'Herniation' but never the standalone word 'Hernia'. Deliberately simpler than TC007 (plain CONSULTATION, no MRI/pre-auth) to isolate JUST the text-matching behavior from TC007's other policy findings.
 - **Important fields:** Diagnosis: 'Suspected Lumbar Disc Herniation with mild radiculopathy' -- note: NOT 'Hernia' standalone anywhere.
 - **Expected classification:** PRESCRIPTION / HOSPITAL_BILL
 - **Expected quality:** GOOD

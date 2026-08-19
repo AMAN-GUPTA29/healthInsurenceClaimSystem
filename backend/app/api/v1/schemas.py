@@ -90,8 +90,8 @@ class ClaimResponse(BaseModel):
     # `.confidence_score`/`.reason_code`/`.explanation` (operations-facing)/
     # `.member_facing_message` (member-facing)/`.explanation_detail` (the
     # full structured ExplanationResult) together satisfy every field
-    # assignment.md point 4 requires — see docs/component-contracts.md
-    # "Claim API — Phase 2D fields". None means "not reached" (claim
+    # assignment.md point 4 requires — see COMPONENT_CONTRACTS.docx
+    # "16. API Contracts". None means "not reached" (claim
     # stopped early — see `status`/`stopped_at`) or "decision generation
     # not configured for this pipeline" — never a fabricated decision.
     decision: Optional[ClaimDecision] = None

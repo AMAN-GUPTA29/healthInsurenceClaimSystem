@@ -10,10 +10,10 @@ Usage (from the backend/ virtualenv):
 TC001-TC003 exercise early document-problem detection (Phase 2A).
 TC004-TC012 run the complete pipeline through to a final decision
 (Phase 2D), using each test case's own `content` blocks as a fixture
-extraction result in place of a real (SSL-blocked in this environment —
-see docs/AI_HANDOFF.md Known Issue 22) Gemini call — see
-app/evaluation/runner.py's module docstring and docs/eval-report.md
-"Methodology" for why this is equivalent for evaluation purposes.
+extraction result in place of a real (SSL-blocked in this environment)
+Gemini call — see app/evaluation/runner.py's module docstring and
+docs/eval-report.md "Methodology" for why this is equivalent for
+evaluation purposes.
 """
 
 from __future__ import annotations

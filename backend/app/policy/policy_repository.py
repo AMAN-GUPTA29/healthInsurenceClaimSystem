@@ -339,9 +339,9 @@ class PolicyRepository:
         against network_hospitals. Returns None — not False — when
         `hospital_name` itself is unknown, since "not a network hospital"
         and "we don't know what hospital this is" are different findings
-        (see docs/architecture.md "Policy Evaluation" for why PolicyEngine
-        never assumes network status for an ambiguous name). Deliberately
-        NOT fuzzy matching — exact match after normalization only.
+        (see docs/tradeoffs.md "Network Hospital Matching" for why
+        PolicyEngine never assumes network status for an ambiguous name).
+        Deliberately NOT fuzzy matching — exact match after normalization only.
         """
         if not hospital_name:
             return None

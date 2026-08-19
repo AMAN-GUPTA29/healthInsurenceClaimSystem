@@ -31,7 +31,7 @@ its own AI failures internally and returns a deterministic fallback
 ExplanationResult — see that agent's docstring), so the pipeline's
 try/except around it is defense-in-depth only; either way, a failure here
 never touches the decision already set by Stage 8. See
-docs/architecture.md "Decision Generation & Explanation (Phase 2D)".
+ARCHITECTURE.docx "8. Decision & Explanation".
 
 Phase 2B note — why extraction runs after cross-document validation, not
 before or in parallel: extraction is the most expensive stage (real
@@ -39,8 +39,8 @@ multimodal AI calls per document, ~20-40s each) and the least reversible
 signal to explain to a member ("here's what we read from your documents").
 Running it only after both early-stop checks already passed means a claim
 that would have stopped anyway (wrong document, unreadable document,
-patient mismatch) never pays that cost — see docs/architecture.md
-"Document Extraction" for the full rationale.
+patient mismatch) never pays that cost — see ARCHITECTURE.docx
+"4. The Pipeline Stages" for the full rationale.
 
 Phase 2C note — why Policy/Financial/Fraud use a different failure model
 than stages 1-3: stages 1-3 are early-stop *gates* (an invalid claim or a
@@ -52,8 +52,7 @@ this rule failed"). So a genuine failure in one of these three stages
 (AI/infra problem — none of them call AI in this phase, but the pattern
 holds for any unexpected exception) is handled with `_run_soft_stage`:
 record FAILED in the trace, leave the corresponding `claim.*_result` field
-`None` (never a guessed/fabricated result — see docs/AI_HANDOFF.md
-invariant re: PolicyEngine/FinancialCalculationService failure), and
+`None` (never a guessed/fabricated result), and
 *continue* to the next stage rather than blocking the claim. Financial
 Calculation is the one dependency in this trio — it needs
 PolicyEvaluationResult as input, so it's skipped (not attempted) if Policy
@@ -72,7 +71,7 @@ SKIPPED event. Exactly one PIPELINE-component event summarizes the run's
 outcome: COMPLETED (reached the end of what's implemented), WARNING
 (stopped early for an expected business reason), or FAILED (stopped
 because a Phase 2A/2B stage genuinely errored). Full rationale in
-docs/architecture.md.
+ARCHITECTURE.docx.
 """
 
 from __future__ import annotations
@@ -160,8 +159,7 @@ def _final_user_message(
     The member-facing message once every configured stage has run without a
     hard stop. Built from the structured results the same way
     DocumentVerificationAgent builds its own message from structured
-    results (see docs/AI_HANDOFF.md invariant #17) — never a hardcoded
-    per-case string.
+    results — never a hardcoded per-case string.
     """
     extraction_result = claim.extraction_result
     notes = []
@@ -239,7 +237,7 @@ class ClaimsPipeline:
         resubmission" business verdict) is caught, recorded in the trace as
         FAILED, and reflected back as a degraded Claim (status=BLOCKED,
         user_message explaining a technical error occurred) rather than
-        propagating — see module docstring and docs/architecture.md for
+        propagating — see module docstring and ARCHITECTURE.docx for
         why this matters for the assignment's graceful-failure requirement.
         """
         classifications = classifications or {}
@@ -267,8 +265,7 @@ class ClaimsPipeline:
         claim.validation_result = validation_result
         # Identity-fix: carry the Member ClaimValidationAgent already
         # resolved forward onto the claim itself (Claim.member existed but
-        # was previously always None — see docs/AI_HANDOFF.md "Phase 2A
-        # identity-validation gap fixed"), so CrossDocumentValidationAgent
+        # was previously always None), so CrossDocumentValidationAgent
         # can check documents against it without a second PolicyRepository
         # lookup.
         claim.member = validation_result.member
@@ -352,8 +349,7 @@ class ClaimsPipeline:
                     "patient_names": r.patient_names,
                     # Identity-fix: safe, structured signal for reconstructing
                     # *why* a BLOCKED verdict happened — never the member's
-                    # full record, just the one field relevant here. See
-                    # docs/AI_HANDOFF.md "Phase 2A identity-validation gap fixed".
+                    # full record, just the one field relevant here.
                     "expected_member_name": claim.member.name if claim.member else None,
                 },
                 confidence_fn=lambda r: r.confidence,

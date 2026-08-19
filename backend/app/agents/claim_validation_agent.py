@@ -71,7 +71,7 @@ class ClaimValidationAgent(BaseAgent):
         # which is meaningless for the supplied test fixtures (all dated
         # 2024) evaluated against a much later system clock. Revisit once
         # claims carry a real `submitted_at` timestamp independent of
-        # "now". See docs/AI_HANDOFF.md.
+        # "now".
 
         minimum_amount = self._policy_repository.minimum_claim_amount
         if submission.claimed_amount < minimum_amount:

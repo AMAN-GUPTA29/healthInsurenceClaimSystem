@@ -7,8 +7,8 @@ The DETERMINISTIC authority on the final claim decision
 FraudAnalysisAgent) and performs NO independent policy or financial
 calculation of its own — it only combines the already-computed outputs of
 PolicyEngine, FinancialCalculationService, and FraudAnalysisAgent (Phase
-2C) plus DocumentExtractionAgent (Phase 2B). See docs/architecture.md
-"Decision Generation (Phase 2D)" for the full rationale and
+2C) plus DocumentExtractionAgent (Phase 2B). See ARCHITECTURE.docx
+"8. Decision & Explanation" for the full rationale and
 docs/tradeoffs.md "Decision Precedence" for exactly how each precedence
 rule was derived from assignment.md/test_cases.json/policy_terms.json —
 including the per-claim-limit reject gate (Rule 5.5, added in the Phase 3

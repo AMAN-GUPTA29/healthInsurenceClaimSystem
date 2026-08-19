@@ -8,9 +8,9 @@
 
 This system automates end-to-end health insurance OPD claim processing. A member submits a claim (member details, treatment category, claimed amount, one or more document uploads); the system verifies the right documents were provided, extracts structured information from them, evaluates the claim against the member's policy, calculates the payable amount, checks for fraud signals, and produces a final decision (`APPROVED` / `PARTIAL` / `REJECTED` / `MANUAL_REVIEW`) with an approved amount, a reason, a confidence score, and a full explainable trace.
 
-A multi-agent architecture with a hard separation between **AI-assisted stages** (document classification and extraction — real Gemini/Claude calls, structured and validated) and a **deterministic core** (policy evaluation, financial calculation, fraud thresholds, and the final decision itself — plain Python, never an LLM). See `docs/architecture.md` for the full design rationale, `docs/component-contracts.md` for every component's precise interface, and `docs/tradeoffs.md` for the judgment calls made along the way.
+A multi-agent architecture with a hard separation between **AI-assisted stages** (document classification and extraction — real Gemini/Claude calls, structured and validated) and a **deterministic core** (policy evaluation, financial calculation, fraud thresholds, and the final decision itself — plain Python, never an LLM). See `ARCHITECTURE.docx` for the full design rationale, `COMPONENT_CONTRACTS.docx` for every component's precise interface, and `docs/tradeoffs.md` for the judgment calls made along the way.
 
-**Current Status: Phase 3 — Final Audit, Correctness & Submission Readiness ✅ COMPLETE.** All 12 official test cases from `test_cases.json` pass through the real pipeline (`docs/eval-report.md`). See `docs/AI_HANDOFF.md` for the complete phase-by-phase build history.
+**Current Status: Phase 3 — Final Audit, Correctness & Submission Readiness ✅ COMPLETE.** All 12 official test cases from `test_cases.json` pass through the real pipeline (`docs/eval-report.md`, `EVAL_REPORT.docx`).
 
 ---
 
@@ -125,7 +125,7 @@ AI_MODEL=gemini-flash-latest
 GEMINI_API_KEY=your-gemini-key
 ```
 
-Restart the backend after changing `.env`. `app/ai/providers/factory.py` selects the concrete provider at startup based on `AI_PROVIDER` alone; no agent, prompt, or pipeline code references either vendor SDK directly. Verified live both ways — see `docs/AI_HANDOFF.md` "AI Provider" for the full account (real Claude API call, a real end-to-end claim through the complete pipeline, and a config-only factory-selection check confirming both directions work without touching application code).
+Restart the backend after changing `.env`. `app/ai/providers/factory.py` selects the concrete provider at startup based on `AI_PROVIDER` alone; no agent, prompt, or pipeline code references either vendor SDK directly. Verified live both ways (real Claude API call, a real end-to-end claim through the complete pipeline, and a config-only factory-selection check confirming both directions work without touching application code).
 
 ---
 
@@ -136,7 +136,7 @@ See [.env.example](.env.example) for all configuration options.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `APP_ENV` | `development` | Application environment |
-| `DATABASE_URL` | SQLite (`./data/claims.db`) | SQLAlchemy async URL — change to a PostgreSQL URL for production, see `docs/architecture.md` "Scaling to 10x Load" |
+| `DATABASE_URL` | SQLite (`./data/claims.db`) | SQLAlchemy async URL — change to a PostgreSQL URL for production, see `ARCHITECTURE.docx` "15. Limitations & Scaling Notes" |
 | `AI_PROVIDER` | `anthropic` | AI provider (`anthropic`, `gemini`) |
 | `AI_MODEL` | `claude-sonnet-4-5` | Model identifier for the configured provider |
 | `AI_TIMEOUT_SECONDS` | `60` | AI API call timeout |
@@ -204,15 +204,15 @@ See `docs/eval-report.md` for the current results table (12/12) and methodology.
 | `GET` | `/api/v1/claims/{claim_id}` | Retrieve a previously submitted claim in full — documents, extraction, policy/financial/fraud results, decision, explanation. |
 | `GET` | `/api/v1/claims/{claim_id}/trace` | The complete structured trace for a claim — every stage's `STARTED`/`COMPLETED`/`FAILED`/`SKIPPED` event, in order. |
 
-Full interactive schema at `/docs` (Swagger UI) once the backend is running. See `docs/component-contracts.md` for the precise shape of every response field.
+Full interactive schema at `/docs` (Swagger UI) once the backend is running. See `COMPONENT_CONTRACTS.docx` "16. API Contracts" for the precise shape of every response field.
 
 ---
 
 ## Deployment
 
-No containerized deployment is provided in this repository (Docker was removed as unnecessary for this assignment's scope — see `docs/AI_HANDOFF.md` "Known Issues"). To deploy:
+No containerized deployment is provided in this repository (Docker was removed as unnecessary for this assignment's scope). To deploy:
 
-- **Backend**: any host that can run `uvicorn app.main:app` behind a process manager (systemd, supervisor, or a PaaS like Render/Railway/Fly.io) — set the environment variables above, point `DATABASE_URL` at a real PostgreSQL instance for anything beyond single-process local use (see `docs/architecture.md` "Scaling to 10x Load"), and mount/persist `data/` for document storage.
+- **Backend**: any host that can run `uvicorn app.main:app` behind a process manager (systemd, supervisor, or a PaaS like Render/Railway/Fly.io) — set the environment variables above, point `DATABASE_URL` at a real PostgreSQL instance for anything beyond single-process local use (see `ARCHITECTURE.docx` "15. Limitations & Scaling Notes"), and mount/persist `data/` for document storage.
 - **Frontend**: `npm run build` produces a static `dist/` bundle (any static host — Vercel/Netlify/S+CloudFront/nginx); set `VITE_API_BASE_URL` to the deployed backend's URL at build time.
 - **Source-of-truth files**: `policy_terms.json`/`test_cases.json`/`sample_documents_guide.md` must be present at the repository root relative to `multi_agent_claims_pipeline/` (see `app/config/paths.py`) — copy them alongside the deployed backend code.
 
@@ -220,11 +220,11 @@ No containerized deployment is provided in this repository (Docker was removed a
 
 ## Known Limitations
 
-The full, current list (with reasoning for each) lives in `docs/AI_HANDOFF.md` "Known Issues". The most significant:
+The most significant:
 
-- **Live Gemini verification is blocked in this development environment** — a corporate SSL-inspection proxy blocks outbound HTTPS to Google's API (`CERTIFICATE_VERIFY_FAILED`; occasionally succeeds, so likely intermittent rather than a hard block — see `docs/AI_HANDOFF.md` Known Issue 22). **Live Anthropic/Claude calls are not blocked** — the current default provider (Claude Sonnet) has been verified with real API calls (structured generation, document classification, document extraction, and explanation generation) through the actual running application, not just mocks. TLS verification has never been disabled to work around either provider's connectivity. Every AI-calling component has also been verified to fail gracefully (structured error, reduced confidence, deterministic fallback where applicable — never a crash) in unit tests with fake providers. See `docs/AI_HANDOFF.md` "AI Provider" / "Verification".
+- **Live Gemini verification is blocked in this development environment** — a corporate SSL-inspection proxy blocks outbound HTTPS to Google's API (`CERTIFICATE_VERIFY_FAILED`; occasionally succeeds, so likely intermittent rather than a hard block). **Live Anthropic/Claude calls are not blocked** — the current default provider (Claude Sonnet) has been verified with real API calls (structured generation, document classification, document extraction, and explanation generation) through the actual running application, not just mocks. TLS verification has never been disabled to work around either provider's connectivity. Every AI-calling component has also been verified to fail gracefully (structured error, reduced confidence, deterministic fallback where applicable — never a crash) in unit tests with fake providers.
 - **No database migrations** — schema changes require recreating the SQLite dev database; PostgreSQL + Alembic is the natural next step before further schema evolution.
-- **Sequential per-document AI calls** — classification/extraction calls are awaited one at a time per claim, not batched or parallelized. See `docs/architecture.md` "Scaling to 10x Load".
+- **Sequential per-document AI calls** — classification/extraction calls are awaited one at a time per claim, not batched or parallelized. See `ARCHITECTURE.docx` "15. Limitations & Scaling Notes".
 - **Session-count and pre-existing-condition tracking** — a small number of policy checks (`max_sessions_per_year`, pre-existing-condition waiting periods) are reported as `WARNING` (honestly "cannot verify"), not computed, since the current data model has no field for the history they'd need.
 
 ---

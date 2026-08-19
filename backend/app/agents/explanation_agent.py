@@ -4,11 +4,11 @@ ExplanationAgent — Phase 2D, pipeline stage 9.
 Turns an already-finalised `ClaimDecision` (produced deterministically by
 DecisionGenerationAgent) plus its supporting evidence into a structured,
 human-readable explanation, using the real configured `AIProvider` (never
-a fixture/mock in the production path — see docs/AI_HANDOFF.md invariant
-re: real AI). The LLM is explicitly instructed never to invent facts,
-never to recalculate anything, and never to contradict the decision it is
+a fixture/mock in the production path). The LLM is explicitly instructed
+never to invent facts, never to recalculate anything, and never to
+contradict the decision it is
 explaining — see app/ai/prompts/explanation.py's system prompt for the
-exact constraints, and docs/architecture.md "Explanation (Phase 2D)" for
+exact constraints, and ARCHITECTURE.docx "8. Decision & Explanation" for
 why this split (deterministic decision, LLM-written explanation) is safe.
 
 Failure handling is the whole point of this agent's design: if the AI call
@@ -61,8 +61,7 @@ class ExplanationAgent(BaseAgent):
             # PydanticValidationError (well-formed JSON that doesn't match
             # ExplanationAIResponse), and anything else a real network/SSL/
             # surface as exception types this codebase doesn't wrap in
-            # AIProviderError (see docs/AI_HANDOFF.md Known Issues re: the
-            # corporate SSL proxy environment issue) — for THIS agent, the
+            # AIProviderError — for THIS agent, the
             # non-negotiable requirement is that a failure here can never
             # take down a claim that already has a valid deterministic
             # decision (assignment.md point 6). Never disables TLS

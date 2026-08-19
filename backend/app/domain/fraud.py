@@ -42,10 +42,10 @@ class FraudAnalysisResult(BaseModel):
     """
     Output of FraudAnalysisAgent.run() — one per claim. Deterministic
     threshold checks (`deterministic_thresholds_triggered`) are always the
-    authoritative signal; `ai_risk_score` (unset in this phase — see
-    docs/AI_HANDOFF.md "Phase 2C" for why deterministic-only fraud
-    analysis was chosen) is kept as a distinct, clearly-separate field so
-    a future AI-assisted signal can never be silently merged into or
+    authoritative signal; `ai_risk_score` (unset in this phase — a
+    deliberate, deterministic-only choice) is kept as a distinct,
+    clearly-separate field so a future AI-assisted signal can never be
+    silently merged into or
     mistaken for a deterministic threshold result.
     """
 

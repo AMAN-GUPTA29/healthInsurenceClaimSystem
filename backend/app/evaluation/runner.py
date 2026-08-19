@@ -21,9 +21,9 @@ Design:
   own structured ground truth) converted into a `ClaimExtractionResult`
   fixture — the exact "compute a decision from real Gemini-shaped output"
   path DocumentExtractionAgent would produce on these clean, unambiguous
-  documents, standing in for a real (SSL-blocked in this environment,
-  see docs/AI_HANDOFF.md Known Issue 22) Gemini call — see
-  `_extraction_result_from_test_case` below and docs/eval-report.md
+  documents, standing in for a real (SSL-blocked in this environment)
+  Gemini call — see `_extraction_result_from_test_case` below and
+  docs/eval-report.md
   "Methodology" for the full justification. Policy/Financial/Fraud/
   Decision Generation make no AI calls at all, so this substitution
   affects only which extraction path produced the input text, never
