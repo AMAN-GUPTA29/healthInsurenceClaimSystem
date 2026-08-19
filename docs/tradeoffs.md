@@ -43,6 +43,14 @@ This document records significant trade-offs made during the project.
 
 **Trade-off**: this is prompt guidance, not a hard classification rule — it improves a real model's structural reasoning but (like any LLM-based classification) cannot be proven correct for every possible document by a mocked/deterministic test suite alone; the unit tests lock in that the guidance text itself is present and generic (no test-case ID, filename, or keyword-only shortcut), not that a live model will always agree.
 
+### No-Legible-Name Gap in Cross-Document Identity Validation
+
+**Choice**: `CrossDocumentValidationAgent` used to silently PASS whenever zero uploaded documents had an AI-readable patient name at all — the reasoning was "nothing to cross-check," but that's different from "nothing to worry about": a claim whose documents genuinely belong to someone else, with a name too degraded, cropped, or absent for the AI to read, would sail through with no identity check having run at all, as long as the (also nameless) documents didn't disagree with *each other*. Now, when a real classification pass (`DocumentClassification.source == "ai"`) finds no legible name anywhere and the claim's member is known, the claim BLOCKS with a message asking for a document that clearly shows the patient's name — the same conservative "can't verify -> don't assume" stance already used for network-hospital matching above.
+
+**Reason**: the existing document<->member check (added by the earlier identity-fix, see `app/agents/cross_document_validation_agent.py`) only ever ran when at least one document had a name to compare — a total absence of names skipped it entirely, which is the opposite of what "we can't verify identity" should mean for an insurance claim.
+
+**Trade-off**: evaluation fixtures (`DocumentClassification.source == "fixture"`, from `DocumentInputAdapter`) are deliberately exempt — `test_cases.json` only populates `patient_name_on_doc` for the one official case that specifically tests identity matching (TC003), so a blanket enforcement would have blocked most of the other eleven official cases for a reason unrelated to what they're actually testing. This means the stricter check only actually fires on the real upload path (`POST /api/v1/claims`), not the official evaluation — intentional, since the official evaluation was never exercising real OCR/AI name extraction in the first place. See `tests/unit/test_cross_document_validation_agent.py::TestNoLegibleNameGapFix` and `tests/integration/test_claims_api.py::test_submit_claim_with_no_legible_patient_name_blocks_instead_of_silently_passing`.
+
 ---
 
 ## Phase 2C — Policy Engine, Financial Calculation & Fraud Analysis

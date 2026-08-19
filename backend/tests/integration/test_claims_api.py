@@ -391,6 +391,55 @@ async def test_submit_claim_member_identity_mismatch_blocks(client_factory):
     assert fraud_events[0]["event_type"] == "SKIPPED"
     decision_events = [e for e in trace["events"] if e["component"] == "DECISION_GENERATION"]
     assert decision_events[0]["event_type"] == "SKIPPED"
+
+
+@pytest.mark.anyio
+async def test_submit_claim_with_no_legible_patient_name_blocks_instead_of_silently_passing(client_factory):
+    """
+    No-legible-name gap fix, HTTP-level regression: real AI classification
+    that reads no patient name off *any* document used to silently PASS
+    Cross-Document Validation — a claim whose documents actually belong to
+    someone else, with a name too degraded/absent for the AI to read,
+    would previously sail through to a decision with no identity check
+    ever having run. It must now BLOCK and ask for a document that shows
+    a legible name, the same as a detected mismatch does.
+    """
+    data = {
+        "member_id": "EMP001",
+        "policy_id": "PLUM_GHI_2024",
+        "claim_category": "CONSULTATION",
+        "treatment_date": "2024-11-01",
+        "claimed_amount": "1500",
+    }
+    files = [
+        ("documents", ("prescription.jpg", JPEG_BYTES, "image/jpeg")),
+        ("documents", ("bill.jpg", JPEG_BYTES, "image/jpeg")),
+    ]
+    ai_responses = [
+        {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
+        {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "", "confidence": 0.88},
+    ]
+    client = await client_factory(ai_responses)
+
+    response = await client.post("/api/v1/claims", data=data, files=files)
+    assert response.status_code == 201  # a business BLOCKED, not an HTTP error
+    result = response.json()
+
+    assert result["status"] == "BLOCKED"
+    assert result["stopped_at"] == "CROSS_DOCUMENT_VALIDATION"
+    assert result["cross_document_validation_result"]["status"] == "BLOCKED"
+    assert "Rajesh Kumar" in result["user_message"]
+    assert "EMP001" in result["user_message"]
+
+    # Same Phase 2C/2D early-stop guarantees as any other Phase 2A block.
+    assert result["policy_evaluation_result"] is None
+    assert result["financial_calculation_result"] is None
+    assert result["fraud_analysis_result"] is None
+    assert result["decision"] is None
+
+    claim_id = result["claim_id"]
+    trace_response = await client.get(f"/api/v1/claims/{claim_id}/trace")
+    trace = trace_response.json()
     explanation_events = [e for e in trace["events"] if e["component"] == "EXPLANATION"]
     assert explanation_events[0]["event_type"] == "SKIPPED"
 
@@ -458,9 +507,9 @@ async def test_submit_claim_multiple_documents_and_metadata(client_factory):
         ("documents", ("bill.jpg", JPEG_BYTES, "image/jpeg")),
     ]
     ai_responses = [
-        {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
-        {"document_type": "LAB_REPORT", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
-        {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
+        {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.9},
+        {"document_type": "LAB_REPORT", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.9},
+        {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.9},
         # Extraction stage (Phase 2B) — one more analyze_document call per
         # document, same order as classification.
         PRESCRIPTION_EXTRACTION_RESPONSE,

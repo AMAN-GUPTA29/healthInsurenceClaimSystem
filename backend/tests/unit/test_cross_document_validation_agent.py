@@ -113,6 +113,67 @@ class TestMissingPatientIdentity:
         assert result.status == CrossDocumentValidationStatus.PASS
 
 
+class TestNoLegibleNameGapFix:
+    """No-legible-name gap fix: a real classification pass that found zero
+    patient names anywhere used to silently PASS with no identity check at
+    all — not just "no conflict", genuinely nothing was verified. A claim
+    whose documents belong to someone else, with a name too degraded for
+    the AI to read, would have sailed through undetected as long as no
+    other document disagreed. This must now BLOCK when the member is
+    known; evaluation fixtures are exempt (see module docstring)."""
+
+    @pytest.mark.anyio
+    async def test_no_names_from_real_classification_blocks_when_member_known(self, agent):
+        result = await agent.run(
+            [
+                DocumentClassification(
+                    file_id="F1", document_type=DocumentType.PRESCRIPTION, patient_name=None, source="ai"
+                ),
+                DocumentClassification(
+                    file_id="F2", document_type=DocumentType.HOSPITAL_BILL, patient_name=None, source="ai"
+                ),
+            ],
+            member=member("Rajesh Kumar", member_id="EMP001"),
+        )
+        assert result.status == CrossDocumentValidationStatus.BLOCKED
+        assert "Rajesh Kumar" in result.user_message
+        assert "EMP001" in result.user_message
+
+    @pytest.mark.anyio
+    async def test_no_names_from_real_classification_still_passes_without_a_member(self, agent):
+        """No member resolved (e.g. an unrecognised member_id would already
+        have blocked earlier at ClaimValidationAgent, but this agent has no
+        way to know that) — same "skip, don't assume" convention as every
+        other member-gated check in this agent."""
+        result = await agent.run(
+            [
+                DocumentClassification(
+                    file_id="F1", document_type=DocumentType.PRESCRIPTION, patient_name=None, source="ai"
+                ),
+            ]
+        )
+        assert result.status == CrossDocumentValidationStatus.PASS
+
+    @pytest.mark.anyio
+    async def test_no_names_from_evaluation_fixture_still_passes_even_with_member_known(self, agent):
+        """The official evaluation's fixture adapter (source="fixture")
+        deliberately doesn't populate patient_name_on_doc for most test
+        cases — that's the fixture's own scope, not a real "AI looked and
+        found nothing" signal, so it must stay exempt from the new check."""
+        result = await agent.run(
+            [
+                DocumentClassification(
+                    file_id="F1", document_type=DocumentType.PRESCRIPTION, patient_name=None, source="fixture"
+                ),
+                DocumentClassification(
+                    file_id="F2", document_type=DocumentType.HOSPITAL_BILL, patient_name=None, source="fixture"
+                ),
+            ],
+            member=member("Rajesh Kumar", member_id="EMP001"),
+        )
+        assert result.status == CrossDocumentValidationStatus.PASS
+
+
 class TestOmittedMemberIsFullyBackwardCompatible:
     """No existing caller passes `member=` — confirms the parameter is
     genuinely optional and changes nothing when absent (evaluation runner,

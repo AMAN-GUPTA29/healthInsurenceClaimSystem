@@ -81,8 +81,12 @@ class TestFullPassThroughPhase2A:
     async def test_claim_with_complete_correct_documents_reaches_end_of_phase_2a(self, policy_repository):
         claim = make_claim()
         classifications = {
-            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
-            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
         }
         pipeline = build_pipeline(policy_repository)
         tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
@@ -105,8 +109,12 @@ class TestFullPassThroughPhase2A:
         # six are legitimately SKIPPED in that case, not a failure.
         claim = make_claim()
         classifications = {
-            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
-            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
         }
         pipeline = build_pipeline(policy_repository)
         tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
@@ -366,8 +374,12 @@ class TestDocumentExtractionStage:
             ]
         )
         classifications = {
-            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
-            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
         }
         tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
 
@@ -400,8 +412,12 @@ class TestDocumentExtractionStage:
             ]
         )
         classifications = {
-            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
-            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
         }
         tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
 
@@ -420,8 +436,12 @@ class TestDocumentExtractionStage:
         tests rely on."""
         claim = make_claim()
         classifications = {
-            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
-            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
         }
         pipeline = build_pipeline(policy_repository)
         tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
@@ -577,8 +597,12 @@ class TestPolicyEngineFailureDegradesGracefully:
 
         claim = make_claim()
         classifications = {
-            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
-            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
         }
         pipeline = ClaimsPipeline(
             claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
@@ -662,7 +686,9 @@ class TestDecisionReachesPartialForLineItemExclusion:
             failures=[], skipped=[], confidence=0.95, has_failures=False,
         )
         classifications = {
-            "F011": DocumentClassification(file_id="F011", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F011": DocumentClassification(
+                file_id="F011", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
         }
         pipeline = build_full_pipeline(policy_repository)
         tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
@@ -789,8 +815,12 @@ class TestDecisionReachesManualReviewForFraud:
             ClaimHistoryItem(claim_id="CLM_0083", date=_date(2024, 10, 30), amount=_Decimal("2100"), provider="Wellness Center"),
         ]
         classifications = {
-            "F017": DocumentClassification(file_id="F017", document_type="PRESCRIPTION", confidence=1.0),
-            "F018": DocumentClassification(file_id="F018", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F017": DocumentClassification(
+                file_id="F017", document_type="PRESCRIPTION", patient_name="Ravi Menon", confidence=1.0
+            ),
+            "F018": DocumentClassification(
+                file_id="F018", document_type="HOSPITAL_BILL", patient_name="Ravi Menon", confidence=1.0
+            ),
         }
         pipeline = build_full_pipeline(policy_repository)
         tracer = TraceService(TraceContext.new(claim_id=claim.claim_id))
@@ -817,8 +847,12 @@ class TestDecisionGenerationFailureDegradesGracefully:
 
         claim = make_claim()
         classifications = {
-            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
-            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
         }
         pipeline = ClaimsPipeline(
             claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
@@ -862,8 +896,12 @@ class TestExplanationFailureDegradesGracefully:
 
         claim = make_claim(hospital_name="City Clinic, Bengaluru")
         classifications = {
-            "F007": DocumentClassification(file_id="F007", document_type="PRESCRIPTION", confidence=1.0),
-            "F008": DocumentClassification(file_id="F008", document_type="HOSPITAL_BILL", confidence=1.0),
+            "F007": DocumentClassification(
+                file_id="F007", document_type="PRESCRIPTION", patient_name="Rajesh Kumar", confidence=1.0
+            ),
+            "F008": DocumentClassification(
+                file_id="F008", document_type="HOSPITAL_BILL", patient_name="Rajesh Kumar", confidence=1.0
+            ),
         }
         pipeline = ClaimsPipeline(
             claim_validation_agent=ClaimValidationAgent(policy_repository=policy_repository),
@@ -993,9 +1031,9 @@ class TestRealClassificationDentalBillReachesPartial:
     async def test_dental_bill_document_reaches_partial_via_real_classification(self, policy_repository):
         storage = _FakeDocumentStorage({"ref-dental-bill": b"%PDF-dental-bill-bytes"})
         provider = _FakeExtractionAIProvider([
-            {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
+            {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.9},
             {
-                "patient_name": "", "hospital_name": "Dental Clinic", "bill_number": "", "bill_date": "",
+                "patient_name": "Rajesh Kumar", "hospital_name": "Dental Clinic", "bill_number": "", "bill_date": "",
                 "admission_date": "", "discharge_date": "", "doctor_name": "", "doctor_registration_number": "",
                 "line_items": [
                     {"description": "Root Canal Treatment", "amount": "8000"},
@@ -1046,12 +1084,12 @@ class TestRealClassificationDiagnosticBillReachesPreAuthRejection:
         })
         provider = _FakeExtractionAIProvider([
             # classification calls, in document order
-            {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
-            {"document_type": "LAB_REPORT", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
-            {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
+            {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "Suresh Patil", "confidence": 0.9},
+            {"document_type": "LAB_REPORT", "quality": "GOOD", "patient_name": "Suresh Patil", "confidence": 0.9},
+            {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "Suresh Patil", "confidence": 0.9},
             # extraction calls, in document order
             {
-                "patient_name": "", "patient_age": "", "patient_gender": "", "patient_date_of_birth": "",
+                "patient_name": "Suresh Patil", "patient_age": "", "patient_gender": "", "patient_date_of_birth": "",
                 "prescription_date": "", "doctor_name": "Dr. Venkat Rao", "doctor_registration_number": "",
                 "doctor_specialization": "", "doctor_hospital_or_clinic": "",
                 "diagnosis": "Suspected Lumbar Disc Herniation", "treatment": "",

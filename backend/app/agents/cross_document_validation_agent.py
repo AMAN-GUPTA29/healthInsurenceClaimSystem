@@ -12,6 +12,22 @@ Purely deterministic: it compares patient names DocumentVerificationAgent
 the `Member` `ClaimValidationAgent` already resolved. It never calls AI
 itself and never re-reads a document.
 
+No-legible-name gap fix: a real classification pass (source="ai") that
+found zero legible patient names on *any* document used to silently PASS,
+on the reasoning "nothing to cross-check" — but that let a claim through
+with no identity confirmation at all, not just no *conflict*. A claim
+whose documents genuinely belong to someone else, with a name too
+degraded/absent for the AI to read, would sail through undetected. This
+now BLOCKS when a real classification found no names anywhere and the
+claim's member is known, asking for a document that shows a legible
+name — the same conservative "can't verify -> don't assume" stance
+already used elsewhere (see docs/tradeoffs.md "Network Hospital
+Matching"). Evaluation fixtures (source="fixture") are deliberately
+exempt: DocumentInputAdapter never populates patient_name_on_doc unless
+the specific test case is exercising identity matching, so fixture data
+having no name reflects the fixture's own scope, not a real "AI found
+nothing" signal.
+
 Identity-fix background: before this fix, two
 documents that agreed with *each other* always passed, even if neither
 belonged to the claim's actual member — e.g. member EMP001 (Rajesh Kumar)
@@ -81,6 +97,17 @@ class CrossDocumentValidationAgent(BaseAgent):
         named = [c for c in classifications if c.patient_name]
 
         if not named:
+            real_classification_attempted = any(c.source == "ai" for c in classifications)
+            if real_classification_attempted and member is not None and member.name:
+                return CrossDocumentValidationResult(
+                    status=CrossDocumentValidationStatus.BLOCKED,
+                    patient_names={},
+                    user_message=(
+                        "None of the uploaded documents show a legible patient name, so we "
+                        f"can't confirm they belong to {member.name} ({member.member_id}). "
+                        "Please upload a document that clearly shows the patient's name."
+                    ),
+                )
             return CrossDocumentValidationResult(
                 status=CrossDocumentValidationStatus.PASS,
                 patient_names={},
