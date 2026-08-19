@@ -20,8 +20,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from reportlab.lib.units import mm  # noqa: E402
+
 from multi_agent_claims_pipeline.test_documents.lib_docbuilder import (  # noqa: E402
+    INNER_W,
     MANIFEST,
+    Doc,
     ManifestEntry,
     apply_correction,
     build_dental_bill,
@@ -669,6 +673,192 @@ def gen_tc012() -> None:
 
 
 # ═════════════════════════════════════════════════════════════════════════
+#  TC013 — NO LEGIBLE PATIENT NAME (not part of the official 12 — added to
+#  manually verify the no-legible-name gap fix in
+#  CrossDocumentValidationAgent: a real classification pass that finds no
+#  patient name on *any* document must now BLOCK, not silently PASS, when
+#  the claim's member is known)
+# ═════════════════════════════════════════════════════════════════════════
+
+def _build_hospital_bill_no_patient_field(
+    path: Path,
+    *,
+    hospital_name: str,
+    hospital_address: str,
+    gstin: str,
+    bill_no: str,
+    date: str,
+    referring_doctor: str,
+    line_items: list,
+) -> float:
+    """
+    Same layout as build_hospital_bill(), minus the Patient Name/Age/Gender
+    rows entirely — a real, complete-looking small-clinic receipt style
+    that never captures patient identity on the bill itself, rather than a
+    conspicuously blank field. Tried a labelled-but-empty Patient Name
+    field first; a real Claude classification call flagged that as
+    "partially readable" (a reasonable read — a field with a label but no
+    value can look like a damaged/incomplete scan), which stopped the
+    pipeline one stage earlier than intended (DOCUMENT_VERIFICATION, not
+    CROSS_DOCUMENT_VALIDATION). Omitting the field outright avoids that.
+    """
+    d = Doc(path)
+    d.header_block(title=hospital_name, subtitle=hospital_address, address=f"GSTIN: {gstin} | Ph: 080-XXXXXXXX")
+    d.title_line("BILL / RECEIPT")
+    d.two_col_row("Bill No", bill_no, "Date", date)
+    d.field_row("Referring Doctor", referring_doctor)
+    d.ln(3)
+    d.hline()
+
+    col_desc = INNER_W / mm - 20 - 20 - 30
+    d.table(
+        headers=[("DESCRIPTION", col_desc), ("QTY", 20), ("RATE (Rs.)", 20), ("AMOUNT (Rs.)", 30)],
+        rows=[[desc, "1", f"{amt:,.2f}", f"{amt:,.2f}"] for desc, amt in line_items],
+    )
+    total = sum(amt for _, amt in line_items)
+
+    d.ln(9)
+    d.right_amount_line("Subtotal:", f"Rs. {total:,.2f}")
+    d.right_amount_line("Total Amount:", f"Rs. {total:,.2f}", bold=True)
+
+    d.ln(9)
+    d.hline(0.4)
+    d.italic_note("Payment Mode: UPI / Cash    |    Received by: Cashier  [Cashier Stamp]")
+    d.save()
+    return total
+
+
+def gen_tc013() -> None:
+    d = OUT / "TC013_no_legible_patient_name"
+
+    # Identical to TC004 in every respect (same member/clinic/doctor/
+    # diagnosis/amounts) EXCEPT the "Patient" field is left blank on both
+    # documents — the only variable being tested is "AI/OCR finds no
+    # legible patient name anywhere," not document quality or content.
+    build_prescription(
+        d / "F025_prescription_no_name.pdf",
+        doctor_name="Arun Sharma", doctor_reg="KA/45678/2015",
+        doctor_specialization="MBBS, MD (Internal Medicine)",
+        clinic_name="City Medical Centre", clinic_address="12 MG Road, Bengaluru - 560001",
+        patient_name="", patient_age=39, patient_gender="M", date="01-Nov-2024",
+        diagnosis="Viral Fever", medicines=["Tab Paracetamol 650mg -- 1-1-1 x 5 days",
+                                             "Tab Vitamin C 500mg -- 0-0-1 x 7 days"],
+        tests=["CBC", "Dengue NS1"],
+    )
+    record(ManifestEntry(
+        test_case="TC013", file_id="F025", filename="F025_prescription_no_name.pdf",
+        document_type="PRESCRIPTION", patient="(blank — deliberately no legible name)",
+        purpose="Otherwise identical to TC004's F007 (clean, GOOD-quality prescription) but the "
+                "'Patient' field is left blank — a real classification call should find no patient "
+                "name here, the scenario the no-legible-name gap fix targets.",
+        important_fields="Doctor: Dr. Arun Sharma (KA/45678/2015); Diagnosis: Viral Fever; "
+                          "Patient field present but blank.",
+        expected_classification="PRESCRIPTION", expected_quality="GOOD",
+        phase2a_note="Document Verification still PASSES (type/quality are fine — only the name is "
+                     "missing, which Document Verification doesn't check).",
+        phase2b_note="Not reached — pipeline stops at CROSS_DOCUMENT_VALIDATION.",
+        phase2c_policy_note="Not reached.", phase2c_financial_note="Not reached.", phase2c_fraud_note="Not reached.",
+    ))
+
+    _build_hospital_bill_no_patient_field(
+        d / "F026_hospital_bill_no_name.pdf",
+        hospital_name="City Clinic, Bengaluru", hospital_address="12 MG Road, Bengaluru - 560001",
+        gstin="29AAACC1234C1ZX", bill_no="CMC/2024/08323", date="01-Nov-2024",
+        referring_doctor="Dr. Arun Sharma",
+        line_items=[("Consultation Fee", 1000.0), ("CBC Test", 300.0), ("Dengue NS1 Antigen Test", 200.0)],
+    )
+    record(ManifestEntry(
+        test_case="TC013", file_id="F026", filename="F026_hospital_bill_no_name.pdf",
+        document_type="HOSPITAL_BILL", patient="(no patient-name field on this bill at all)",
+        purpose="Otherwise identical to TC004's F008 (same total, Rs. 1500) but this bill's layout "
+                "never includes a Patient Name line at all (a real, complete-looking receipt style "
+                "some smaller clinics use) — a labelled-but-blank field was tried first and a real "
+                "Claude classification flagged it as 'partially readable', an earlier and different "
+                "stop than the one this case is meant to exercise; omitting the field entirely reads "
+                "as a complete document with no name to extract, not a damaged one.",
+        important_fields="Line items: Consultation Fee 1000, CBC 300, Dengue NS1 200; Total: Rs. 1500; "
+                          "no Patient Name line anywhere on the bill.",
+        expected_classification="HOSPITAL_BILL", expected_quality="GOOD",
+        phase2a_note="CROSS_DOCUMENT_VALIDATION: BLOCKED — 'None of the uploaded documents show a "
+                     "legible patient name, so we can't confirm they belong to Rajesh Kumar (EMP001). "
+                     "Please upload a document that clearly shows the patient's name.'",
+        phase2b_note="Not reached.", phase2c_policy_note="Not reached.",
+        phase2c_financial_note="Not reached.", phase2c_fraud_note="Not reached.",
+        expected_final_decision="None — claim status BLOCKED at CROSS_DOCUMENT_VALIDATION, before any "
+                                 "decision stage runs. (Before today's fix this incorrectly reached "
+                                 "APPROVED, Rs. 1350 payable, same as TC004 — the exact gap being closed.)",
+    ))
+
+
+# ═════════════════════════════════════════════════════════════════════════
+#  TC014 — ONE DOCUMENT NAMED, ONE NOT (not part of the official 12 —
+#  added to manually verify the every-document gap fix in
+#  CrossDocumentValidationAgent: one document showing the correct member's
+#  name is no longer enough to vouch for a claim where another real
+#  document has no legible name at all — every document must now be
+#  identifiable and matching)
+# ═════════════════════════════════════════════════════════════════════════
+
+def gen_tc014() -> None:
+    d = OUT / "TC014_partial_identification"
+
+    # F007's exact content (from TC004) — a normal, correctly-named
+    # prescription for the real member.
+    build_prescription(
+        d / "F027_prescription_rajesh.pdf",
+        doctor_name="Arun Sharma", doctor_reg="KA/45678/2015",
+        doctor_specialization="MBBS, MD (Internal Medicine)",
+        clinic_name="City Medical Centre", clinic_address="12 MG Road, Bengaluru - 560001",
+        patient_name="Rajesh Kumar", patient_age=39, patient_gender="M", date="01-Nov-2024",
+        diagnosis="Viral Fever", medicines=["Tab Paracetamol 650mg -- 1-1-1 x 5 days",
+                                             "Tab Vitamin C 500mg -- 0-0-1 x 7 days"],
+        tests=["CBC", "Dengue NS1"],
+    )
+    record(ManifestEntry(
+        test_case="TC014", file_id="F027", filename="F027_prescription_rajesh.pdf",
+        document_type="PRESCRIPTION", patient="Rajesh Kumar",
+        purpose="Same content as TC004's F007 — a normal, correctly-named prescription for the "
+                "real member. Paired with F028 (no name at all) to test that ONE confirmed match "
+                "is no longer enough for the whole claim to pass.",
+        important_fields="Doctor: Dr. Arun Sharma (KA/45678/2015); Diagnosis: Viral Fever; "
+                          "Patient: Rajesh Kumar.",
+        expected_classification="PRESCRIPTION", expected_quality="GOOD",
+        phase2a_note="Document Verification PASSES.",
+        phase2b_note="Not reached — pipeline stops at CROSS_DOCUMENT_VALIDATION.",
+        phase2c_policy_note="Not reached.", phase2c_financial_note="Not reached.", phase2c_fraud_note="Not reached.",
+    ))
+
+    # Same no-patient-name-field layout as TC013's F026 — a real,
+    # complete-looking bill that just never captures patient identity.
+    _build_hospital_bill_no_patient_field(
+        d / "F028_hospital_bill_no_name.pdf",
+        hospital_name="City Clinic, Bengaluru", hospital_address="12 MG Road, Bengaluru - 560001",
+        gstin="29AAACC1234C1ZX", bill_no="CMC/2024/08324", date="01-Nov-2024",
+        referring_doctor="Dr. Arun Sharma",
+        line_items=[("Consultation Fee", 1000.0), ("CBC Test", 300.0), ("Dengue NS1 Antigen Test", 200.0)],
+    )
+    record(ManifestEntry(
+        test_case="TC014", file_id="F028", filename="F028_hospital_bill_no_name.pdf",
+        document_type="HOSPITAL_BILL", patient="(no patient-name field on this bill at all)",
+        purpose="Same total (Rs. 1500) and layout as TC013's F026 — a real, complete-looking bill "
+                "with no Patient Name line anywhere. Paired with F027 (correctly named) to test "
+                "that a match on one document doesn't vouch for this one.",
+        important_fields="Line items: Consultation Fee 1000, CBC 300, Dengue NS1 200; Total: Rs. 1500; "
+                          "no Patient Name line anywhere on the bill.",
+        expected_classification="HOSPITAL_BILL", expected_quality="GOOD",
+        phase2a_note="CROSS_DOCUMENT_VALIDATION: BLOCKED — 'Hospital Bill does not show a legible "
+                     "patient name, so we can't confirm every uploaded document belongs to Rajesh "
+                     "Kumar (EMP001). Please upload a version that clearly shows the patient's name.'",
+        phase2b_note="Not reached.", phase2c_policy_note="Not reached.",
+        phase2c_financial_note="Not reached.", phase2c_fraud_note="Not reached.",
+        expected_final_decision="None — claim status BLOCKED at CROSS_DOCUMENT_VALIDATION, before any "
+                                 "decision stage runs. (Before this fix, F027's correct name was enough "
+                                 "on its own — the claim incorrectly reached APPROVED, Rs. 1350 payable, "
+                                 "even though F028 had no confirmed identity at all.)",
+    ))
+
+
+# ═════════════════════════════════════════════════════════════════════════
 #  EXTRA_PHASE2C — additional manual PolicyEngine/FinancialCalculation/
 #  FraudAnalysis verification scenarios (not part of the official 12)
 # ═════════════════════════════════════════════════════════════════════════
@@ -1224,6 +1414,9 @@ if __name__ == "__main__":
     gen_tc011()
     gen_tc012()
     print(f"TC001-TC012 generated: {len(MANIFEST)} manifest entries so far.")
+    gen_tc013()
+    gen_tc014()
+    print(f"TC013/TC014 (not part of the official 12) generated: {len(MANIFEST)} manifest entries so far.")
     gen_extra()
     print(f"EXTRA_PHASE2C generated: {len(MANIFEST)} manifest entries so far.")
     gen_quality_tests()

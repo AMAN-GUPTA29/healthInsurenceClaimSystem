@@ -85,6 +85,8 @@ For every test case below:
 | **EXTRA07** | `CROSS_DOCUMENT_VALIDATION` (BLOCKED) | Both documents agree with each other but disagree with the claim's actual member (Phase 2A identity-fix regression) |
 | **EXTRA08** | `CROSS_DOCUMENT_VALIDATION` (BLOCKED) | Documents disagree with *each other* (checked before member identity) |
 | **EXTRA03** | Likely `CLAIM_VALIDATION` (before document verification even runs) | Claimed amount (₹400) below the ₹500 policy minimum |
+| **TC013** *(not part of the official 12)* | `CROSS_DOCUMENT_VALIDATION` (BLOCKED) | No document shows a legible patient name at all — the no-legible-name gap fix |
+| **TC014** *(not part of the official 12)* | `CROSS_DOCUMENT_VALIDATION` (BLOCKED) | One document is correctly named, the other shows no name at all — the every-document gap fix |
 | All other cases (TC004-TC012 except TC003, EXTRA01/02/04/05/06/09, QUALITY_TESTS Q1-Q8) | Reach the end of the pipeline (`status=PROCESSING`) | No early-stop condition — Policy/Financial/Fraud all run; final decision (`APPROVED`/`PARTIAL`/`REJECTED`/`MANUAL_REVIEW`) is **not yet implemented** (Phase 2D), so `status` stays `PROCESSING` even for cases whose *official* expected outcome is REJECTED/PARTIAL/MANUAL_REVIEW — check the **Policy Evaluation** / **Financial Calculation** / **Fraud Analysis** sections directly for the underlying findings instead of a final verdict. |
 
 For every case that reaches `POLICY_ENGINE`/`FINANCIAL_CALCULATION`/
@@ -179,6 +181,8 @@ test_documents/
 ├── TC010_network_hospital/         F019, F020
 ├── TC011_component_failure/        F021, F022  (see §5 for the failure flag)
 ├── TC012_excluded_treatment/       F023, F024
+├── TC013_no_legible_patient_name/  F025, F026  (not part of the official 12 — see below)
+├── TC014_partial_identification/   F027, F028  (not part of the official 12 — see below)
 ├── EXTRA_PHASE2C/                  EXTRA01-EXTRA09 (18 files — see TEST_MANIFEST.md)
 ├── QUALITY_TESTS/                  Q1-Q8 (document-robustness variations)
 ├── TEST_MANIFEST.md                Full per-file expected-behavior breakdown

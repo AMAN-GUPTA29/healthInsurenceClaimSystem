@@ -12,21 +12,27 @@ Purely deterministic: it compares patient names DocumentVerificationAgent
 the `Member` `ClaimValidationAgent` already resolved. It never calls AI
 itself and never re-reads a document.
 
-No-legible-name gap fix: a real classification pass (source="ai") that
-found zero legible patient names on *any* document used to silently PASS,
-on the reasoning "nothing to cross-check" — but that let a claim through
-with no identity confirmation at all, not just no *conflict*. A claim
-whose documents genuinely belong to someone else, with a name too
-degraded/absent for the AI to read, would sail through undetected. This
-now BLOCKS when a real classification found no names anywhere and the
-claim's member is known, asking for a document that shows a legible
-name — the same conservative "can't verify -> don't assume" stance
-already used elsewhere (see docs/tradeoffs.md "Network Hospital
-Matching"). Evaluation fixtures (source="fixture") are deliberately
-exempt: DocumentInputAdapter never populates patient_name_on_doc unless
-the specific test case is exercising identity matching, so fixture data
-having no name reflects the fixture's own scope, not a real "AI found
-nothing" signal.
+No-legible-name gap fix: a real classification pass (source="ai") used to
+require only *one* document to carry a legible, matching patient name —
+any other document with no readable name at all rode along unverified,
+as long as it didn't actively disagree with the one that was readable.
+That's backwards for an insurance claim: a hospital bill with no visible
+patient name is exactly the document whose payable amount is about to be
+approved, and "some other document had a name" doesn't establish that
+THIS bill belongs to this member. Every document — not just one — must
+now show a legible name that matches the claim's member (when a real
+classification ran and the member is known), or the claim BLOCKS asking
+for a version that clearly shows the patient's name; the same
+conservative "can't verify -> don't assume" stance already used
+elsewhere (see docs/tradeoffs.md "Network Hospital Matching"). A
+detected identity *conflict* (documents disagreeing with each other, or
+agreeing on the wrong person) is still reported first and takes priority
+over "some document has no name" — a specific wrong-identity finding is
+more actionable than a generic "can't confirm" one. Evaluation fixtures
+(source="fixture") are deliberately exempt: DocumentInputAdapter never
+populates patient_name_on_doc unless the specific test case is
+exercising identity matching, so fixture data having no name reflects
+the fixture's own scope, not a real "AI found nothing" signal.
 
 Identity-fix background: before this fix, two
 documents that agreed with *each other* always passed, even if neither
@@ -95,10 +101,12 @@ class CrossDocumentValidationAgent(BaseAgent):
         parameter didn't exist.
         """
         named = [c for c in classifications if c.patient_name]
+        unnamed = [c for c in classifications if not c.patient_name]
+        real_classification_attempted = any(c.source == "ai" for c in classifications)
+        member_known = member is not None and bool(member.name)
 
         if not named:
-            real_classification_attempted = any(c.source == "ai" for c in classifications)
-            if real_classification_attempted and member is not None and member.name:
+            if real_classification_attempted and member_known:
                 return CrossDocumentValidationResult(
                     status=CrossDocumentValidationStatus.BLOCKED,
                     patient_names={},
@@ -144,7 +152,7 @@ class CrossDocumentValidationAgent(BaseAgent):
         # ClaimDecision yet (rejection_reasons lives there, Phase 3); this
         # result's existing `status`/`user_message` already carries the
         # same signal a member-facing message needs today.
-        if member is not None and member.name:
+        if member_known:
             document_identity = next(iter(distinct))
             if _normalize_name(member.name) != document_identity:
                 detected_name = named[0].patient_name
@@ -159,6 +167,28 @@ class CrossDocumentValidationAgent(BaseAgent):
                     user_message=message,
                     confidence=overall_confidence,
                 )
+
+        # (c) Every-document gap fix — the named document(s) agree with
+        # each other and with the member, but at least one OTHER document
+        # (real classification, not a fixture) still has no legible name
+        # at all. A confirmed match elsewhere doesn't vouch for a document
+        # that couldn't be identified — the unverified one could belong to
+        # anyone. Only reachable once (a)/(b) already found no conflict,
+        # since a specific wrong-identity finding is more actionable than
+        # this generic "can't confirm every document" one.
+        if real_classification_attempted and member_known and unnamed:
+            missing = ", ".join(_label(c.document_type) for c in unnamed)
+            message = (
+                f"{missing} does not show a legible patient name, so we can't confirm "
+                f"every uploaded document belongs to {member.name} ({member.member_id}). "
+                "Please upload a version that clearly shows the patient's name."
+            )
+            return CrossDocumentValidationResult(
+                status=CrossDocumentValidationStatus.BLOCKED,
+                patient_names=patient_names,
+                user_message=message,
+                confidence=overall_confidence,
+            )
 
         if len(named) < 2:
             return CrossDocumentValidationResult(

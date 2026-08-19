@@ -445,6 +445,50 @@ async def test_submit_claim_with_no_legible_patient_name_blocks_instead_of_silen
 
 
 @pytest.mark.anyio
+async def test_submit_claim_with_one_unnamed_document_blocks_even_if_other_matches(client_factory):
+    """
+    Every-document gap fix, HTTP-level regression: one document showing
+    the correct member's name used to be enough for the *whole* claim to
+    pass, even with another real document that had no legible name at
+    all — the unverified one just rode along on the other's credibility.
+    A hospital bill with no visible patient name is exactly the document
+    whose payable amount is about to be approved; it must now BLOCK too.
+    """
+    data = {
+        "member_id": "EMP001",
+        "policy_id": "PLUM_GHI_2024",
+        "claim_category": "CONSULTATION",
+        "treatment_date": "2024-11-01",
+        "claimed_amount": "1500",
+    }
+    files = [
+        ("documents", ("prescription.jpg", JPEG_BYTES, "image/jpeg")),
+        ("documents", ("bill.jpg", JPEG_BYTES, "image/jpeg")),
+    ]
+    ai_responses = [
+        {"document_type": "PRESCRIPTION", "quality": "GOOD", "patient_name": "Rajesh Kumar", "confidence": 0.95},
+        {"document_type": "HOSPITAL_BILL", "quality": "GOOD", "patient_name": "", "confidence": 0.9},
+    ]
+    client = await client_factory(ai_responses)
+
+    response = await client.post("/api/v1/claims", data=data, files=files)
+    assert response.status_code == 201  # a business BLOCKED, not an HTTP error
+    result = response.json()
+
+    assert result["status"] == "BLOCKED"
+    assert result["stopped_at"] == "CROSS_DOCUMENT_VALIDATION"
+    assert result["cross_document_validation_result"]["status"] == "BLOCKED"
+    assert "Hospital Bill" in result["user_message"]
+    assert "Rajesh Kumar" in result["user_message"]
+    assert "EMP001" in result["user_message"]
+
+    assert result["policy_evaluation_result"] is None
+    assert result["financial_calculation_result"] is None
+    assert result["fraud_analysis_result"] is None
+    assert result["decision"] is None
+
+
+@pytest.mark.anyio
 async def test_submit_claim_rejects_unsupported_file_type(client_factory):
     data = {
         "member_id": "EMP001",

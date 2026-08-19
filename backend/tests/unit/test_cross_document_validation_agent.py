@@ -174,6 +174,115 @@ class TestNoLegibleNameGapFix:
         assert result.status == CrossDocumentValidationStatus.PASS
 
 
+class TestEveryDocumentMustBeIdentifiable:
+    """Every-document gap fix: one document showing the correct patient
+    name used to be enough to pass the whole claim, even if another real
+    document had no legible name at all — the unverified one just rode
+    along. A hospital bill with no visible patient name is exactly the
+    document whose payable amount is about to be approved; "some other
+    document had a name" doesn't establish that THIS one belongs to this
+    member. Every document must now be identifiable and matching when a
+    real classification ran and the member is known."""
+
+    @pytest.mark.anyio
+    async def test_one_matching_name_and_one_unnamed_document_now_blocks(self, agent):
+        result = await agent.run(
+            [
+                DocumentClassification(
+                    file_id="F1", document_type=DocumentType.PRESCRIPTION,
+                    patient_name="Rajesh Kumar", confidence=1.0, source="ai",
+                ),
+                DocumentClassification(
+                    file_id="F2", document_type=DocumentType.HOSPITAL_BILL,
+                    patient_name=None, source="ai",
+                ),
+            ],
+            member=member("Rajesh Kumar", member_id="EMP001"),
+        )
+        assert result.status == CrossDocumentValidationStatus.BLOCKED
+        assert "Hospital Bill" in result.user_message
+        assert "Rajesh Kumar" in result.user_message
+        assert "EMP001" in result.user_message
+
+    @pytest.mark.anyio
+    async def test_wrong_name_on_one_document_still_takes_priority_over_unnamed_other(self, agent):
+        """A detected wrong-identity conflict is a more specific, more
+        actionable finding than "some document has no name" — it must
+        still win when both are true at once, not get swallowed by the
+        generic every-document message."""
+        result = await agent.run(
+            [
+                DocumentClassification(
+                    file_id="F1", document_type=DocumentType.PRESCRIPTION,
+                    patient_name="Vikram Joshi", confidence=1.0, source="ai",
+                ),
+                DocumentClassification(
+                    file_id="F2", document_type=DocumentType.HOSPITAL_BILL,
+                    patient_name=None, source="ai",
+                ),
+            ],
+            member=member("Rajesh Kumar", member_id="EMP001"),
+        )
+        assert result.status == CrossDocumentValidationStatus.BLOCKED
+        assert "Vikram Joshi" in result.user_message
+        assert "Rajesh Kumar" in result.user_message
+
+    @pytest.mark.anyio
+    async def test_one_matching_name_and_one_unnamed_still_passes_without_a_member(self, agent):
+        result = await agent.run(
+            [
+                DocumentClassification(
+                    file_id="F1", document_type=DocumentType.PRESCRIPTION,
+                    patient_name="Rajesh Kumar", confidence=1.0, source="ai",
+                ),
+                DocumentClassification(
+                    file_id="F2", document_type=DocumentType.HOSPITAL_BILL,
+                    patient_name=None, source="ai",
+                ),
+            ]
+        )
+        assert result.status == CrossDocumentValidationStatus.PASS
+
+    @pytest.mark.anyio
+    async def test_one_matching_name_and_one_unnamed_evaluation_fixture_still_passes(self, agent):
+        """Same fixture exemption as the no-legible-name-at-all case — a
+        fixture that only bothers to populate one document's name is still
+        the fixture's own scope, not a real "AI found nothing" signal."""
+        result = await agent.run(
+            [
+                DocumentClassification(
+                    file_id="F1", document_type=DocumentType.PRESCRIPTION,
+                    patient_name="Rajesh Kumar", confidence=1.0, source="fixture",
+                ),
+                DocumentClassification(
+                    file_id="F2", document_type=DocumentType.HOSPITAL_BILL,
+                    patient_name=None, source="fixture",
+                ),
+            ],
+            member=member("Rajesh Kumar", member_id="EMP001"),
+        )
+        assert result.status == CrossDocumentValidationStatus.PASS
+
+    @pytest.mark.anyio
+    async def test_all_documents_named_and_matching_still_passes(self, agent):
+        """Regression guard: the new check must not fire when every
+        document genuinely does have a matching name."""
+        result = await agent.run(
+            [
+                DocumentClassification(
+                    file_id="F1", document_type=DocumentType.PRESCRIPTION,
+                    patient_name="Rajesh Kumar", confidence=1.0, source="ai",
+                ),
+                DocumentClassification(
+                    file_id="F2", document_type=DocumentType.HOSPITAL_BILL,
+                    patient_name="Rajesh Kumar", confidence=1.0, source="ai",
+                ),
+            ],
+            member=member("Rajesh Kumar", member_id="EMP001"),
+        )
+        assert result.status == CrossDocumentValidationStatus.PASS
+
+
 class TestOmittedMemberIsFullyBackwardCompatible:
     """No existing caller passes `member=` — confirms the parameter is
     genuinely optional and changes nothing when absent (evaluation runner,

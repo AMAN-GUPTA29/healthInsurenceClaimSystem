@@ -388,6 +388,74 @@ See `README.md` in this directory for how to actually run each case through the 
 - **Expected Phase 2C fraud behavior:** LOW risk, no flags.
 - **Expected final decision:** REJECTED, rejection reason EXCLUDED_CONDITION.
 
+## TC013
+
+_Not part of the official 12 — added to manually verify the no-legible-name gap fix in `CrossDocumentValidationAgent`: a real classification pass that finds no patient name on any document must now BLOCK, not silently PASS, when the claim's member is known._
+
+### F025 — `F025_prescription_no_name.pdf`
+
+- **Document type:** PRESCRIPTION
+- **Patient:** (blank — deliberately no legible name)
+- **Purpose:** Otherwise identical to TC004's F007 (clean, GOOD-quality prescription) but the 'Patient' field is left blank — a real classification call should find no patient name here, the scenario the no-legible-name gap fix targets.
+- **Important fields:** Doctor: Dr. Arun Sharma (KA/45678/2015); Diagnosis: Viral Fever; Patient field present but blank.
+- **Expected classification:** PRESCRIPTION
+- **Expected quality:** GOOD
+- **Expected Phase 2A behavior:** Document Verification still PASSES (type/quality are fine — only the name is missing, which Document Verification doesn't check).
+- **Expected Phase 2B extraction:** Not reached — pipeline stops at CROSS_DOCUMENT_VALIDATION.
+- **Expected Phase 2C policy behavior:** Not reached.
+- **Expected Phase 2C financial behavior:** Not reached.
+- **Expected Phase 2C fraud behavior:** Not reached.
+- **Expected final decision:** N/A (Phase 2D not implemented yet)
+
+### F026 — `F026_hospital_bill_no_name.pdf`
+
+- **Document type:** HOSPITAL_BILL
+- **Patient:** (no patient-name field on this bill at all)
+- **Purpose:** Otherwise identical to TC004's F008 (same total, Rs. 1500) but this bill's layout never includes a Patient Name line at all (a real, complete-looking receipt style some smaller clinics use) — a labelled-but-blank field was tried first and a real Claude classification flagged it as 'partially readable', an earlier and different stop than the one this case is meant to exercise; omitting the field entirely reads as a complete document with no name to extract, not a damaged one.
+- **Important fields:** Line items: Consultation Fee 1000, CBC 300, Dengue NS1 200; Total: Rs. 1500; no Patient Name line anywhere on the bill.
+- **Expected classification:** HOSPITAL_BILL
+- **Expected quality:** GOOD
+- **Expected Phase 2A behavior:** CROSS_DOCUMENT_VALIDATION: BLOCKED — 'None of the uploaded documents show a legible patient name, so we can't confirm they belong to Rajesh Kumar (EMP001). Please upload a document that clearly shows the patient's name.'
+- **Expected Phase 2B extraction:** Not reached.
+- **Expected Phase 2C policy behavior:** Not reached.
+- **Expected Phase 2C financial behavior:** Not reached.
+- **Expected Phase 2C fraud behavior:** Not reached.
+- **Expected final decision:** None — claim status BLOCKED at CROSS_DOCUMENT_VALIDATION, before any decision stage runs. (Before the fix this incorrectly reached APPROVED, Rs. 1350 payable, same as TC004 — the exact gap being closed.)
+
+## TC014
+
+_Not part of the official 12 — added to manually verify the every-document gap fix in `CrossDocumentValidationAgent`: one document showing the correct member's name is no longer enough to vouch for a claim where another real document has no legible name at all — every document must now be identifiable and matching._
+
+### F027 — `F027_prescription_rajesh.pdf`
+
+- **Document type:** PRESCRIPTION
+- **Patient:** Rajesh Kumar
+- **Purpose:** Same content as TC004's F007 — a normal, correctly-named prescription for the real member. Paired with F028 (no name at all) to test that ONE confirmed match is no longer enough for the whole claim to pass.
+- **Important fields:** Doctor: Dr. Arun Sharma (KA/45678/2015); Diagnosis: Viral Fever; Patient: Rajesh Kumar.
+- **Expected classification:** PRESCRIPTION
+- **Expected quality:** GOOD
+- **Expected Phase 2A behavior:** Document Verification PASSES.
+- **Expected Phase 2B extraction:** Not reached — pipeline stops at CROSS_DOCUMENT_VALIDATION.
+- **Expected Phase 2C policy behavior:** Not reached.
+- **Expected Phase 2C financial behavior:** Not reached.
+- **Expected Phase 2C fraud behavior:** Not reached.
+- **Expected final decision:** N/A (Phase 2D not implemented yet)
+
+### F028 — `F028_hospital_bill_no_name.pdf`
+
+- **Document type:** HOSPITAL_BILL
+- **Patient:** (no patient-name field on this bill at all)
+- **Purpose:** Same total (Rs. 1500) and layout as TC013's F026 — a real, complete-looking bill with no Patient Name line anywhere. Paired with F027 (correctly named) to test that a match on one document doesn't vouch for this one.
+- **Important fields:** Line items: Consultation Fee 1000, CBC 300, Dengue NS1 200; Total: Rs. 1500; no Patient Name line anywhere on the bill.
+- **Expected classification:** HOSPITAL_BILL
+- **Expected quality:** GOOD
+- **Expected Phase 2A behavior:** CROSS_DOCUMENT_VALIDATION: BLOCKED — 'Hospital Bill does not show a legible patient name, so we can't confirm every uploaded document belongs to Rajesh Kumar (EMP001). Please upload a version that clearly shows the patient's name.'
+- **Expected Phase 2B extraction:** Not reached.
+- **Expected Phase 2C policy behavior:** Not reached.
+- **Expected Phase 2C financial behavior:** Not reached.
+- **Expected Phase 2C fraud behavior:** Not reached.
+- **Expected final decision:** None — claim status BLOCKED at CROSS_DOCUMENT_VALIDATION, before any decision stage runs. (Before this fix, F027's correct name was enough on its own — the claim incorrectly reached APPROVED, Rs. 1350 payable, even though F028 had no confirmed identity at all.)
+
 ## EXTRA01
 
 ### EXTRA01-NET — `EXTRA01_prescription_network.pdf / EXTRA01_hospital_bill_network_apollo.pdf`
